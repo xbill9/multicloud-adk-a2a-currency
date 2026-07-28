@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multicloud-adk-a2a-currency"
+version = "0.1.0"
+description = "Three-cloud A2A interoperability matrix: Google ADK, Bedrock AgentCore, and Microsoft Foundry currency agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.10",
+  "httpx>=0.28",
+]
+
+[project.scripts]
+currency-mesh = "coordinator.cli:main"
+currency-matrix = "matrix.runner:main"
+currency-mcp-server = "mcp_server.server:main"
+
+[project.optional-dependencies]
+# Each cloud's stack is optional so a single agent can be run, and a single
+# matrix row filled, without installing all three vendors' SDKs.
+gcp = ["google-adk>=2.5", "a2a-sdk>=1.0"]
+aws = ["strands-agents>=1.50", "bedrock-agentcore>=1.18", "a2a-sdk>=1.0"]
+azure = ["agent-framework-core>=1.12", "agent-framework-a2a>=1.0.0b0", "agent-framework-foundry>=1.10"]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.9",
+]
+
+[tool.setuptools.packages.find]
+include = ["coordinator*", "protocol*", "clients*", "agents*", "matrix*", "mcp_server*", "evaluations*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
