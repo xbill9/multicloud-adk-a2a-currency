@@ -67,6 +67,62 @@ This does **not** reproduce on a local mesh, where bind address and dial
 address coincide. It needs a deployment, or a deliberate mismatch, which is
 why it survived into production in the first place.
 
+### Confirmed on this repo's own deployment (2026-07-31)
+
+The GCP agent is now on Cloud Run, and it reproduces exactly:
+
+```console
+$ curl -sH "Authorization: Bearer $(gcloud auth print-identity-token)" \
+    https://currency-gcp-...run.app/.well-known/agent-card.json
+{"url": null,
+ "additionalInterfaces": [{"url": "http://0.0.0.0:8080", "protocolBinding": "JSONRPC", ...}]}
+```
+
+A public HTTPS endpoint advertising unroutable plaintext `http://0.0.0.0:8080`.
+Hosted it is strictly worse than the two-cloud sighting above: `127.0.0.1` at
+least resolves, and the scheme downgrade is new.
+
+**Which clients survive it is the opposite of what finding 3 predicts.** Same
+deployed server, one matrix column:
+
+| client | local | deployed |
+|---|---|---|
+| `a2a-sdk` | ok 69ms | **ok 1027ms** — rewrites the interfaces after resolution |
+| `agent-framework` `A2AAgent` | ok 31ms | **ok 424ms** — never routes by card, so the bad card is inert |
+| `google-adk` `RemoteA2aAgent` | ok 864ms | **fails** — routes by card, dials `0.0.0.0:8080` |
+
+`agent-framework` cannot *express* the workaround (finding 3) and does not need
+it, because it dials the URL it was constructed with. The stack that fails is
+**ADK's own client against ADK's own server** — `to_a2a()` writes the bind
+address and `RemoteA2aAgent` honours it, so the one pairing that is entirely
+one vendor's code is the one that cannot complete a hop. Both halves ship
+green in Google's own tests, because locally the two addresses coincide.
+
+## Finding 5: ADK's client masks the connection error with an `AttributeError`
+
+Chased down from finding 2's deployed failure. Having dialled `0.0.0.0:8080`
+and failed, `RemoteA2aAgent` does not report that:
+
+```
+google-adk -> gcp: A2A protocol failure from https://currency-gcp-...run.app:
+  AttributeError: 'A2AClientError' object has no attribute 'status_code'
+```
+
+The error handler assumes any `A2AClientError` carries `.status_code`, which a
+transport-layer failure does not. So the reported error names neither the
+address it could not reach nor the reason — the actual cause (`All connection
+attempts failed`) only appears on a separate log line, and the exception that
+propagates is from the error handler, not the error.
+
+Two defects compounding is what makes this expensive: the first sends the
+client to an unroutable address, and the second removes the evidence of where
+it went. A reader of the exception alone would look for a protocol mismatch.
+
+This is the general form of the trap this project keeps hitting — **an error
+that is reported at the wrong layer costs more than the failure it describes**.
+See also the 401 misfiled as a protocol failure under "found by deploying"
+below.
+
 ## Finding 3: the three client SDKs are not the same kind of object
 
 Ergonomics, not correctness, but it shapes what you can fix:
@@ -92,12 +148,38 @@ Ergonomics, not correctness, but it shapes what you can fix:
 2.5.0 + `a2a-sdk` 1.1.2**, pinned in this repo's venv. A2A v1.0 is recent
 enough that "latest of each" is not yet a safe assumption.
 
+## Found by deploying, not by testing
+
+Both of these were caught within minutes of the first authenticated Cloud Run
+call, by code that had a green 69-test suite. Neither was reachable locally.
+
+**A 401 classified as a protocol failure.** `a2a-sdk` wraps the card fetch's
+`httpx.HTTPStatusError` in its own `AgentCardResolutionError`, exposing the
+original only as `__cause__`. `clients/base.py` caught the httpx type directly,
+so a genuine auth denial was filed as `protocol` — the matrix pointing at the
+wrong layer, which is the most expensive wrong answer this instrument can give.
+Fixed by walking the exception chain; the message now names the failing URL,
+because a 401 on `/.well-known/agent-card.json` (discovery is privileged) is a
+different fix from a 401 on the message endpoint.
+
+**A totally failed run exiting 0.** `MeshRun.succeeded` was `bool(results)`,
+and there is always one result envelope per requested target whether or not
+anything filled it. Harmless while it only drove a CLI exit code on a laptop.
+Wrong the moment a Cloud Run job's exit status became the health signal: the
+run where every participant 401'd reported green.
+
 ## What is deliberately not claimed
 
-- Latencies are local and direct-brain. They measure protocol and framework
-  overhead, not cloud-to-cloud network time, and not model time.
+- Latencies in the nine-cell matrix are local and direct-brain. They measure
+  protocol and framework overhead, not cloud-to-cloud network time, and not
+  model time.
 - The rate values agree trivially: every agent reads the same fixture table.
   That is the point — see the note on Frankfurter in the README. Numeric
   consensus is exercised by fault injection, not by hoping three models
   disagree.
-- No cell has been run against a deployed agent yet. All three are local.
+- **Only the GCP agent is deployed.** The deployed column above is one server,
+  not a matrix. AWS and Azure remain local, so no cell in this document
+  measures a genuinely cross-cloud hop — and the GCP one is coordinator and
+  agent both in GCP, an in-cloud hop rather than a cross-cloud one.
+- The deployed latencies (424ms–1027ms) are a single execution each, cold, with
+  no warm/cold distribution behind them.

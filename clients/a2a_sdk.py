@@ -48,7 +48,7 @@ class A2ASdkClient(A2AQuoteClient):
         # local_address pins the socket to IPv4; IPv6 to some hosts hangs in
         # some sandboxes (same workaround as FrankfurterRateProvider).
         transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-        async with httpx.AsyncClient(timeout=self._timeout_s, transport=transport) as httpx_client:
+        async with self._http_client(transport=transport) as httpx_client:
             resolver = A2ACardResolver(httpx_client=httpx_client, base_url=self._endpoint)
             card = await resolver.get_agent_card()
             # Interop workaround, matrix cell (a2a-sdk -> ADK): ADK's to_a2a()

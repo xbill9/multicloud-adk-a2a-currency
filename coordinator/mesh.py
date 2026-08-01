@@ -59,6 +59,9 @@ class CurrencyMesh:
         return MeshRun(
             request=request,
             participants=[participant.name for participant in self._participants],
+            auth_modes={
+                participant.name: participant.auth for participant in self._participants
+            },
             results=results,
             failures=failures,
             elapsed_ms=(perf_counter() - started) * 1000,

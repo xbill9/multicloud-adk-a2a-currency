@@ -5,7 +5,10 @@ so exercising the base against a stubbed ``_send`` covers all three without a
 network, credentials, or vendor SDKs.
 """
 
+import threading
+from contextlib import contextmanager
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
@@ -128,3 +131,46 @@ def test_every_declared_stack_is_constructible_or_reports_a_missing_sdk():
             continue
         assert client.stack == stack
         assert client.endpoint == "http://stub.invalid"
+
+
+class _Unauthorized(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@contextmanager
+def unauthorized_server():
+    server = HTTPServer(("127.0.0.1", 0), _Unauthorized)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+
+
+async def test_a_401_on_the_card_fetch_is_authentication_not_protocol():
+    """Regression from the first authenticated deploy.
+
+    a2a-sdk wraps the card fetch's HTTPStatusError in its own
+    AgentCardResolutionError, so catching only the httpx type filed a real 401
+    as a protocol failure -- the matrix pointing at the wrong layer entirely.
+    Driven against a real 401 rather than a synthetic exception chain, because
+    the shape of that chain is the vendor's choice and can change.
+    """
+    a2a_sdk = pytest.importorskip("clients.a2a_sdk")
+
+    with unauthorized_server() as endpoint:
+        client = a2a_sdk.A2ASdkClient(endpoint, timeout_s=10)
+        with pytest.raises(AdapterError) as exc:
+            await client.convert(request("EUR"))
+
+    assert exc.value.kind is FailureKind.AUTHENTICATION
+    # The URL distinguishes a privileged discovery endpoint from a privileged
+    # message endpoint, which are different fixes.
+    assert "agent-card.json" in str(exc.value)

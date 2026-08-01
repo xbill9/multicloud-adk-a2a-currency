@@ -20,7 +20,7 @@ from clients import CLIENT_STACKS, load_client
 from coordinator.local_adapters import DeterministicCurrencyAdapter
 from coordinator.mesh import CurrencyMesh
 from coordinator.models import ConversionRequest
-from coordinator.participants import Participant
+from coordinator.participants import Participant, auth_mode, credentials_for
 from coordinator.providers import FrankfurterRateProvider, StaticRateProvider
 
 CLOUD_ENDPOINTS = {
@@ -69,14 +69,20 @@ def build_participants(args) -> list[Participant]:
     for cloud in clouds:
         env_var, default = CLOUD_ENDPOINTS[cloud]
         endpoint = os.getenv(env_var, default)
+        auth = credentials_for(cloud, endpoint)
         participants.append(
             Participant(
                 name=cloud,
                 source=load_client(
-                    args.client, endpoint, source=cloud, timeout_s=args.timeout_seconds
+                    args.client,
+                    endpoint,
+                    source=cloud,
+                    timeout_s=args.timeout_seconds,
+                    auth=auth,
                 ),
                 cloud=cloud,
                 stack=args.client,
+                auth=auth_mode(auth),
             )
         )
     if args.local_reference:
@@ -100,7 +106,13 @@ def _fmt(value: Decimal) -> str:
 
 
 def render(run) -> str:
-    lines = [f"participants: {', '.join(run.participants)}", ""]
+    # Annotate only the authenticated legs, so the all-local run reads exactly
+    # as it did before the auth seam existed.
+    named = [
+        f"{name} ({mode})" if (mode := run.auth_modes.get(name, "none")) != "none" else name
+        for name in run.participants
+    ]
+    lines = [f"participants: {', '.join(named)}", ""]
     for result in run.results:
         if result.consensus_amount is None:
             lines.append(f"{result.target_currency}: no cloud answered")

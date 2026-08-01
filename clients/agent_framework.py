@@ -20,6 +20,11 @@ class AgentFrameworkClient(A2AQuoteClient):
     async def _send(self, prompt: str) -> str:
         from agent_framework_a2a import A2AAgent
 
-        agent = A2AAgent(name=self._agent_name, url=self._endpoint)
-        response = await agent.run(prompt)
-        return response.text or ""
+        # A2AAgent builds its own httpx client when not given one, which would
+        # leave no way to attach a credential -- the same closed-box property
+        # that makes the bad-card workaround inexpressible in this stack. It
+        # does accept http_client, so the credential goes on that.
+        async with self._http_client() as httpx_client:
+            agent = A2AAgent(name=self._agent_name, url=self._endpoint, http_client=httpx_client)
+            response = await agent.run(prompt)
+            return response.text or ""

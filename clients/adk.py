@@ -32,26 +32,31 @@ class AdkClient(A2AQuoteClient):
         from google.adk.sessions import InMemorySessionService
         from google.genai import types
 
-        remote = RemoteA2aAgent(name=self._agent_name, agent_card=self._card_url)
-        session_service = InMemorySessionService()
-        runner = Runner(
-            agent=remote,
-            app_name=_APP_NAME,
-            session_service=session_service,
-        )
-        session = await session_service.create_session(app_name=_APP_NAME, user_id=_USER_ID)
+        async with self._http_client() as httpx_client:
+            remote = RemoteA2aAgent(
+                name=self._agent_name,
+                agent_card=self._card_url,
+                httpx_client=httpx_client,
+            )
+            session_service = InMemorySessionService()
+            runner = Runner(
+                agent=remote,
+                app_name=_APP_NAME,
+                session_service=session_service,
+            )
+            session = await session_service.create_session(app_name=_APP_NAME, user_id=_USER_ID)
 
-        texts: list[str] = []
-        try:
-            async for event in runner.run_async(
-                user_id=_USER_ID,
-                session_id=session.id,
-                new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
-            ):
-                if event.content and event.content.parts:
-                    texts.extend(part.text for part in event.content.parts if part.text)
-        finally:
-            close = getattr(runner, "close", None)
-            if close is not None:
-                await close()
-        return "\n".join(texts)
+            texts: list[str] = []
+            try:
+                async for event in runner.run_async(
+                    user_id=_USER_ID,
+                    session_id=session.id,
+                    new_message=types.Content(role="user", parts=[types.Part(text=prompt)]),
+                ):
+                    if event.content and event.content.parts:
+                        texts.extend(part.text for part in event.content.parts if part.text)
+            finally:
+                close = getattr(runner, "close", None)
+                if close is not None:
+                    await close()
+            return "\n".join(texts)

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from clients import CLIENT_STACKS, load_client
+from coordinator.auth import auth_mode, credentials_for
 from coordinator.errors import AdapterError
 from coordinator.models import ConversionRequest
 from matrix.model import Cell, MatrixReport
@@ -48,14 +49,30 @@ async def probe(
     timeout_s: float,
 ) -> Cell:
     """Run one directed A2A call and classify whatever comes back."""
+    try:
+        auth = credentials_for(server.name, server.endpoint)
+    except AdapterError as exc:
+        # Misconfigured credentials are a cell failure, not a crash: one
+        # unconfigured cloud must not stop the other six cells from running.
+        return Cell(
+            client_stack=stack,
+            server=server.name,
+            server_cloud=server.cloud,
+            server_stack=server.stack,
+            ok=False,
+            failure_kind=exc.kind.value,
+            detail=str(exc)[:300],
+        )
+
     base = dict(
         client_stack=stack,
         server=server.name,
         server_cloud=server.cloud,
         server_stack=server.stack,
+        auth=auth_mode(auth),
     )
     try:
-        client = load_client(stack, server.endpoint, timeout_s=timeout_s)
+        client = load_client(stack, server.endpoint, timeout_s=timeout_s, auth=auth)
     except ImportError as exc:
         return Cell(**base, ok=False, failure_kind="sdk-missing", detail=str(exc))
 
@@ -136,6 +153,14 @@ def render_table(report: MatrixReport) -> str:
     attempted = report.attempted
     passed = [cell for cell in attempted if cell.ok]
     lines += ["", f"{len(passed)}/{len(attempted)} attempted cells succeeded"]
+
+    # Only shown once something is deployed; against the local mesh every leg
+    # is "none" and the table reads as it always did.
+    authed = {cell.server: cell.auth for cell in report.cells if cell.auth != "none"}
+    if authed:
+        lines.append(
+            "auth: " + ", ".join(f"{server}={mode}" for server, mode in sorted(authed.items()))
+        )
 
     skipped = [cell for cell in report.cells if cell.failure_kind == "sdk-missing"]
     if skipped:

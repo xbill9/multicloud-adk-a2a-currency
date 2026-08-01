@@ -8,9 +8,14 @@ question together.
 It exists to answer a question the two-cloud version could not: **does A2A
 actually interoperate between vendors, or does every pair need a workaround?**
 
-Short answer: all nine client/server pairs work, and two of them only after
-working around defects that neither vendor's own tests would catch. See
-[`docs/INTEROP.md`](docs/INTEROP.md).
+Short answer: locally, all nine client/server pairs work — two only after
+working around defects that neither vendor's own tests would catch. Deployed,
+that number drops: against the hosted GCP agent, **ADK's own client cannot
+reach ADK's own server**, because `to_a2a()` advertises the container's bind
+address and `RemoteA2aAgent` believes it. Both halves pass Google's tests,
+because locally those two addresses are the same.
+
+See [`docs/INTEROP.md`](docs/INTEROP.md).
 
 ## The matrix
 
@@ -145,11 +150,21 @@ python -m coordinator.cli 100 USD EUR GBP
 ./infra/run_mesh.sh stop
 ```
 
+The GCP leg can also be run deployed and authenticated. The coordinator runs as
+a Cloud Run job rather than locally because a user credential cannot mint an
+arbitrary-audience ID token at all — there is no laptop equivalent of this path.
+
+```bash
+./infra/deploy_gcp.sh deploy     # service + coordinator job + roles/run.invoker
+./infra/deploy_gcp.sh run        # execute the job
+./infra/deploy_gcp.sh destroy
+```
+
 Tests are hermetic by default; the live suite skips itself unless the mesh is
 up.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # 45 passed
+.venv/bin/python -m pytest tests/ -q     # 71 passed
 ```
 
 ## Status
@@ -162,14 +177,30 @@ Done and verified:
 - Three client stacks behind one interface, sharing one parser.
 - The full 3×3 matrix passing locally, with two real interop defects found,
   diagnosed, and documented.
-- 45 tests, including all nine cells as assertions and a
+- 71 tests, including all nine cells as assertions and a
   cloud-goes-offline degradation case.
+- One credential seam for all three legs (`coordinator/auth.py`): Google ID
+  token, STS `AssumeRoleWithWebIdentity` → SigV4, and Entra federated exchange
+  behind a single `httpx.Auth`, attached to the client so the agent-card fetch
+  is authenticated too. Peers default to unauthenticated, so the local matrix
+  stays a protocol instrument.
+- **The GCP leg is deployed and authenticated** (`./infra/deploy_gcp.sh`): the
+  ADK agent as a Cloud Run service with `--no-allow-unauthenticated`, reached
+  by the coordinator running as a Cloud Run job with a workload OIDC token.
+  Proven in both directions — 643ms with the right audience, 401 on the card
+  fetch with the wrong one, 403 with no token. Deploying it immediately found
+  two defects a green test suite had not, and confirmed interop finding 2
+  against a real hosted card — where the client it breaks turns out to be
+  ADK's own.
 
 Not done:
 
-- **Nothing is deployed.** All three agents are local. Cloud Run, AgentCore
-  Runtime, and Foundry hosting are the obvious next step, and finding 2 only
-  reproduces once they are.
+- **Two of three agents are still local.** AWS (AgentCore) and Azure (Foundry)
+  are undeployed, so no measurement here crosses a cloud boundary — the one
+  deployed hop is coordinator and agent both in GCP, an in-cloud hop.
+- **Two of three auth legs have never seen a real provider.** The AWS STS and
+  Entra implementations are hermetically tested only; no token has been
+  exchanged with either. Treat them as code, not as results.
 - `llm` mode is implemented but has been exercised for none of the three
   clouds; all measurements here are direct-brain.
 - No token or cost accounting, and no warm/cold latency distributions.

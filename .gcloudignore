@@ -1,0 +1,10 @@
+.git
+.gitignore
+.venv
+.run
+.pytest_cache
+**/__pycache__
+*.egg-info
+docs
+tests
+report.json

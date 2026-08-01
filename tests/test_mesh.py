@@ -109,3 +109,26 @@ async def test_participants_are_called_concurrently():
     elapsed = asyncio.get_running_loop().time() - started
 
     assert elapsed < 0.4, "fan-out should overlap, not serialize"
+
+
+async def test_a_run_where_every_cloud_failed_is_not_a_success():
+    """Regression from the first deploy: exit status is the job's health signal.
+
+    ``succeeded`` used to be ``bool(results)``, and there is always one result
+    per requested target whether or not anything filled it -- so a Cloud Run
+    job whose every participant 401'd exited 0 and reported green.
+    """
+    mesh = CurrencyMesh([Participant(name="broken", source=_FailingSource())])
+
+    run = await mesh.run(
+        ConversionRequest(amount=Decimal(100), source_currency="USD", target_currencies=["EUR"])
+    )
+
+    assert run.results, "a result envelope per target is still expected"
+    assert run.failures
+    assert not run.succeeded
+
+
+class _FailingSource:
+    async def convert(self, request):
+        raise AdapterError(FailureKind.AUTHENTICATION, "A2A endpoint returned 401")

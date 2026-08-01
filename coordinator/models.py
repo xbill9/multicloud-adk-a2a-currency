@@ -76,13 +76,25 @@ class MeshRun(BaseModel):
 
     request: ConversionRequest
     participants: list[str] = Field(default_factory=list)
+    #: Participant name -> auth mode actually used on that leg. Recorded in the
+    #: run rather than inferred from config afterwards: "which legs were
+    #: keyless" is a claim the artifact has to be able to back on its own.
+    auth_modes: dict[str, str] = Field(default_factory=dict)
     results: list[ConsensusResult] = Field(default_factory=list)
     failures: dict[str, str] = Field(default_factory=dict)
     elapsed_ms: float = Field(ge=0)
 
     @property
     def succeeded(self) -> bool:
-        return bool(self.results)
+        """True when at least one target actually reached a consensus value.
+
+        Not ``bool(self.results)``: there is always one result per requested
+        target, populated or not, so that test passed even when every cloud
+        failed. Harmless while this only drove a CLI exit code on a laptop;
+        wrong once a Cloud Run job's exit status is the health signal, where it
+        reported a totally failed run as green.
+        """
+        return any(result.consensus_amount is not None for result in self.results)
 
     @property
     def verified(self) -> bool:

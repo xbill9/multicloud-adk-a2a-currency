@@ -12,6 +12,8 @@ class Cell(BaseModel):
     server: str
     server_cloud: str
     server_stack: str
+    #: Auth mode used to reach this server; "none" against the local mesh.
+    auth: str = "none"
     ok: bool
     #: FailureKind value, or "sdk-missing" when the client SDK is not installed.
     failure_kind: str | None = None
