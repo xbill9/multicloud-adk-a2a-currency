@@ -156,12 +156,33 @@ participants: gcp (google-id-token), aws (aws-sigv4), azure (entra-fic)
 elapsed 25012ms
 ```
 
-Everything scales to zero, so that run is three simultaneous cold starts. The
-warm shape, from 2026-08-03: `gcp 1006ms, aws 902ms, azure 476ms, elapsed
-1770ms`. **Consensus latency is ≈ max(legs), not their sum** — 1770 against a
-1006ms slowest leg — which confirms the coordinator issues all three
-concurrently rather than assuming it. Cold, the same relation holds: 25012
-against 24127.
+Everything scales to zero, so that run is three simultaneous cold starts.
+
+**Warm, with Azure temporarily at `minReplicas: 1`** (2026-08-07, three
+consecutive runs, all `3/3 clouds, agreed`):
+
+| run | gcp | aws | azure | max(legs) | sum(legs) | elapsed |
+|---|---|---|---|---|---|---|
+| 1 | 1327 | 1344 | 485 | 1344 | 3156 | **2494** |
+| 2 | 1394 | 1028 | 511 | 1394 | 2933 | **2258** |
+| 3 | 1138 | 1116 | 1532 | 1532 | 3786 | **2511** |
+
+**The legs are issued concurrently — elapsed is nowhere near the sum.** But the
+sharper claim, "elapsed ≈ max(legs)", is not quite what the numbers say: there
+is a consistent ~1s floor above the slowest leg (979–1117ms across all three,
+and ~760ms in the 2026-08-03 run). That is the coordinator's own fixed cost —
+job container start, three agent-card fetches, three credential mints — and it
+is *not* included in any per-leg figure, because those are timed around the
+conversion call. So:
+
+> elapsed ≈ max(legs) + ~1s fixed, and emphatically not sum(legs)
+
+Quote it that way. "≈ max(legs)" alone would predict 1344ms for run 1 and be
+wrong by 85%, and the fixed cost is the part that would grow with a fourth
+cloud only if the mints were serialised — which is worth knowing and is not
+measured here.
+
+Cold, the same shape holds: 25012 elapsed against a 24127ms slowest leg.
 
 The Azure leg was cold on *every* run an hour apart — 24127ms, 21848ms,
 26847ms — because the deployed Container App sat at `minReplicas: 0` while

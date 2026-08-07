@@ -35,6 +35,14 @@ counts; every other latency in this document is loopback.
 | `agent-framework` | ok 477ms | ok 5700ms | ok 360ms |
 | `google-adk` | **transport** | ok 5913ms | ok 433ms |
 
+Re-run with Azure held warm at `minReplicas: 1`, same 8/9:
+
+| client \ server | GCP `us-central1` | AWS `us-west-2` | Azure `westus2` (warm) |
+|---|---|---|---|
+| `a2a-sdk` | ok 15966ms | ok 1052ms | ok 2070ms |
+| `agent-framework` | ok 490ms | ok 5678ms | ok 414ms |
+| `google-adk` | **transport** | ok 864ms | ok 637ms |
+
 **8/9. The one red cell is finding 2, and it is still ADK's own client against
 ADK's own server.** That is the same failure the single-column deployed run
 found on 2026-07-31, now reproduced with the other two clouds beside it as
@@ -46,15 +54,21 @@ Read the latencies with care, and preferably not at all:
 
 - **Every service scales to zero**, so the first call into a column pays a cold
   start and the rest do not. `a2a-sdk` is simply the first row the runner
-  executes; the 15.5s in its GCP cell is a container starting, not a stack
-  being slow, and `agent-framework` hits the same server 477ms later.
-- The 5.7s and 5.9s AWS cells are the exception to that reading — they come
-  *after* a warm 1288ms cell in the same column, so AgentCore is doing
-  something per-session that a cold start does not explain. Unexplained, and
-  flagged rather than smoothed over.
-- These are single runs. There is no warm/cold distribution behind any number
-  in this table, which is exactly why it should not be quoted as a comparison
-  between clouds.
+  executes; the ~15.5s in its GCP cell is a container starting, not a stack
+  being slow, and `agent-framework` hits the same server ~480ms later. That
+  number is stable across both runs, so it is the cold start, reproducibly.
+- **Warming Azure moves its column from ~24s cold to 414–2070ms** and changes
+  nothing else. That is the whole of the Azure "slowness" seen in earlier
+  tables: `minReplicas`, not Container Apps.
+- **`agent-framework` → AWS is reproducibly ~5.7s** — 5700ms, then 5678ms an
+  hour later — while the other two clients reach the same runtime in ~1s in the
+  same run. It is not a cold start: it comes *after* a warm cell in its own
+  column, and `google-adk` fell from 5913ms to 864ms between runs while this
+  cell did not move. Something in that client/AgentCore pairing costs a fixed
+  ~4.5s. Unexplained, and flagged rather than smoothed over.
+- These are single runs per cell. There is still no distribution behind any
+  individual number, which is why this table should not be quoted as a
+  comparison between clouds.
 
 The predecessor series' prediction holds in shape: 0.4–1.5s to warm containers,
 and nothing here approaches the 18.8–25.1s it measured against hosted *model*
