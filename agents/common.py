@@ -14,12 +14,18 @@ and they all support two brains:
     The real configuration; also the one that can fail on formatting.
 """
 
+import logging
 import os
 import re
 from decimal import Decimal, InvalidOperation
 
 from coordinator.models import ConversionRequest
-from coordinator.providers import FrankfurterRateProvider, RateProvider, StaticRateProvider
+from coordinator.providers import (
+    FrankfurterRateProvider,
+    RateProvider,
+    ScaledRateProvider,
+    StaticRateProvider,
+)
 
 INSTRUCTION = (
     "You are a specialized assistant for currency conversions. "
@@ -57,8 +63,22 @@ def rate_provider() -> RateProvider:
     numbers that are supposed to measure A2A.
     """
     if os.getenv("CURRENCY_RATE_PROVIDER", "fixture").strip().lower() == "frankfurter":
-        return FrankfurterRateProvider()
-    return StaticRateProvider()
+        provider = FrankfurterRateProvider()
+    else:
+        provider = StaticRateProvider()
+
+    # Fault injection, opt-in and loud: makes this agent return a divergent
+    # rate so the median can be shown holding rather than asserted. Never set
+    # in a measurement run -- ./infra/demo.sh act 4 is what it is for.
+    scale = os.getenv("CURRENCY_RATE_SCALE", "").strip()
+    if scale:
+        logging.getLogger("agents").warning(
+            "CURRENCY_RATE_SCALE=%s -- this agent is deliberately returning "
+            "divergent rates. Not a valid measurement configuration.",
+            scale,
+        )
+        provider = ScaledRateProvider(provider, Decimal(scale))
+    return provider
 
 
 def parse_conversion_prompt(text: str) -> ConversionRequest | None:
@@ -96,9 +116,9 @@ async def deterministic_reply(text: str, provider: RateProvider | None = None) -
         except ValueError as exc:
             return f"I cannot convert to {target}: {exc}"
         lines.append(
-            '{"source_currency": "%s", "target_currency": "%s", "rate": %s, '
-            '"converted_amount": %s}'
-            % (request.source_currency, target, rate, request.amount * rate)
+            f'{{"source_currency": "{request.source_currency}", '
+            f'"target_currency": "{target}", "rate": {rate}, '
+            f'"converted_amount": {request.amount * rate}}}'
         )
     return "\n".join(lines)
 

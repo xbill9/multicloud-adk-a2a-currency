@@ -10,16 +10,18 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Pinned exactly as in the README: google-adk 2.4.0 cannot serve A2A v1.0
-# (finding 4 in docs/INTEROP.md), so this pin is load-bearing, not hygiene.
+# Unpinned deliberately. google-adk 2.4.0 could not serve A2A v1.0 (finding 4
+# in docs/INTEROP.md), but that was a fact about 2.4.0, not a law: retested
+# 2026-08-02 against google-adk 2.6.1 + a2a-sdk 1.1.2 and to_a2a imports and
+# serves. A pin nobody retests is indistinguishable from rot.
 RUN pip install \
-      "a2a-sdk[http-server]==1.1.2" \
-      "google-adk==2.5.0" \
+      "a2a-sdk[http-server]" \
+      google-adk \
       agent-framework-a2a \
       agent-framework-core \
-      "pydantic>=2.10" \
-      "httpx>=0.28" \
-      "uvicorn>=0.30"
+      pydantic \
+      httpx \
+      uvicorn
 
 COPY pyproject.toml README.md ./
 COPY agents ./agents

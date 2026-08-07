@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,10 +7,10 @@ name = "multicloud-adk-a2a-currency"
 version = "0.1.0"
 description = "Three-cloud A2A interoperability matrix: Google ADK, Bedrock AgentCore, and Microsoft Foundry currency agents"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-  "pydantic>=2.10",
-  "httpx>=0.28",
+  "pydantic",
+  "httpx",
 ]
 
 [project.scripts]
@@ -21,13 +21,17 @@ currency-mcp-server = "mcp_server.server:main"
 [project.optional-dependencies]
 # Each cloud's stack is optional so a single agent can be run, and a single
 # matrix row filled, without installing all three vendors' SDKs.
-gcp = ["google-adk>=2.5", "a2a-sdk>=1.0"]
-aws = ["strands-agents>=1.50", "bedrock-agentcore>=1.18", "a2a-sdk>=1.0"]
-azure = ["agent-framework-core>=1.12", "agent-framework-a2a>=1.0.0b0", "agent-framework-foundry>=1.10"]
+gcp = ["google-adk", "a2a-sdk"]
+# botocore[crt] is not optional despite reading like it: strands' Bedrock model
+# resolves credentials through botocore's login provider, which raises
+# MissingDependencyException without the CRT extra. Found 2026-08-02 on a clean
+# install -- neither strands-agents nor bedrock-agentcore declares it.
+aws = ["strands-agents", "bedrock-agentcore", "a2a-sdk", "botocore[crt]"]
+azure = ["agent-framework-core", "agent-framework-a2a", "agent-framework-foundry"]
 dev = [
-  "pytest>=8.3",
-  "pytest-asyncio>=0.25",
-  "ruff>=0.9",
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
 ]
 
 [tool.setuptools.packages.find]
@@ -39,4 +43,4 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"

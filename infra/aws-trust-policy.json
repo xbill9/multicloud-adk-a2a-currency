@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Trust policy for the role the GCP-hosted master assumes via STS",
+    "AssumeRoleWithWebIdentity. deploy_aws.sh renders this with the real",
+    "audience and subject; it is checked in so the conditions can be reviewed",
+    "without running anything, because every one of them is a documented trap.",
+
+    "1. Principal.Federated is the literal string 'accounts.google.com'.",
+    "   Do NOT create an IAM OIDC provider for it. AWS federates with Google",
+    "   natively and adding an explicit provider BREAKS this with",
+    "   InvalidIdentityToken -- for Entra the opposite is true and you must",
+    "   create one. Same-looking task, opposite rules.",
+
+    "2. accounts.google.com:oaud is the token's `aud` claim. The similarly",
+    "   named accounts.google.com:aud is the token's `azp`, which is a number.",
+    "   An audience string placed in :aud can never match, and the denial does",
+    "   not say why.",
+
+    "3. :sub is the service account's immutable numeric unique ID, not its",
+    "   email. An email can be freed and re-bound to a different principal, so",
+    "   a condition written against one is a condition that can be inherited.",
+    "   Read it with:",
+    "     gcloud iam service-accounts describe SA --format='value(uniqueId)'",
+
+    "4. Both conditions are required. Audience alone is not authorization --",
+    "   it is caller-chosen, so it proves only that *some* Google identity",
+    "   minted the token, not which one."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GcpMasterAssumesThisRole",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "accounts.google.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "accounts.google.com:oaud": "${AUDIENCE}",
+          "accounts.google.com:sub": "${MASTER_SA_UNIQUE_ID}"
+        }
+      }
+    }
+  ]
+}

@@ -64,7 +64,7 @@ async def probe(
             detail=str(exc)[:300],
         )
 
-    base = dict(
+    base = dict(  # noqa: C408 - keyword form reads better than a literal here
         client_stack=stack,
         server=server.name,
         server_cloud=server.cloud,
@@ -212,7 +212,11 @@ async def _run(args) -> int:
     print(render_table(report))
 
     if args.json_path:
-        with open(args.json_path, "w") as handle:
+        # Blocking write in an async function, deliberately: this is the last
+        # statement of a CLI entrypoint with nothing else in flight, and
+        # pulling in an async file library to satisfy the linter would be a
+        # dependency bought for one line.
+        with open(args.json_path, "w") as handle:  # noqa: ASYNC230
             handle.write(report.model_dump_json(indent=2))
         print(f"\nwrote {args.json_path}")
 

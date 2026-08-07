@@ -1,0 +1,49 @@
+# The Azure agent, packaged for Azure Container Apps.
+#
+# Container Apps rather than Foundry Agent Service, and that is not the Lambda
+# compromise the AWS leg rejected. The AWS agent had a real choice: AgentCore
+# Runtime hosts an A2A container natively, so anything else would have been
+# generic compute standing in for an agent runtime. Azure has no equivalent --
+# Foundry Agent Service hosts Foundry-defined agents, not arbitrary containers
+# serving A2A, and this agent *is* an Agent Framework A2AExecutor server.
+# Container Apps is where such a container runs. Foundry remains in the path in
+# `llm` mode, as the model behind the executor.
+#
+# Label it accurately in the article: "Agent Framework A2AExecutor, hosted on
+# Container Apps" -- the serving stack, which is what the matrix measures, is
+# Microsoft's own.
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# agent-framework-a2a brings the A2AExecutor this column exists to test.
+# Unpinned, per CLAUDE.md.
+RUN pip install \
+      "a2a-sdk[http-server]" \
+      agent-framework-core \
+      agent-framework-a2a \
+      pydantic \
+      httpx \
+      uvicorn
+
+COPY pyproject.toml README.md ./
+COPY agents ./agents
+COPY clients ./clients
+COPY coordinator ./coordinator
+COPY protocol ./protocol
+
+RUN pip install --no-deps -e .
+
+# PUBLIC_URL is set after the ingress FQDN exists -- without it the card
+# advertises the bind address, which is interop finding 2 and the defect that
+# only reproduces once bind and dial addresses differ.
+ENV HOST=0.0.0.0 \
+    PORT=8080 \
+    CURRENCY_MODEL_MODE=direct
+
+EXPOSE 8080
+CMD ["python", "-m", "agents.azure.server"]

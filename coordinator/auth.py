@@ -333,6 +333,7 @@ class AwsSigV4Auth(httpx.Auth):
         audience: str,
         service: str = "bedrock-agentcore",
         session_name: str = "currency-mesh-coordinator",
+        extra_headers: dict[str, str] | None = None,
         identity: WorkloadIdentity | None = None,
         timeout_s: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -342,6 +343,7 @@ class AwsSigV4Auth(httpx.Auth):
         self._audience = audience
         self._service = service
         self._session_name = session_name
+        self._extra_headers = extra_headers or {}
         self._identity = identity or WorkloadIdentity()
         self._timeout_s = timeout_s
         self._transport = transport
@@ -356,12 +358,19 @@ class AwsSigV4Auth(httpx.Auth):
 
     async def async_auth_flow(self, request: httpx.Request):
         credentials = await self._credentials()
+        # Set before signing and named to the signer, so they fall inside the
+        # signature. AgentCore's session header is required on every request
+        # including the card fetch, and an unsigned x-amzn-* header is the kind
+        # of thing a service may accept today and reject later.
+        for name, value in self._extra_headers.items():
+            request.headers[name] = value
         _sign_request(
             request,
             credentials=credentials,
             region=self._region,
             service=self._service,
             now=datetime.now(UTC),
+            extra_signed_headers=tuple(self._extra_headers),
         )
         yield request
 
@@ -474,12 +483,19 @@ def _sign_request(
     region: str,
     service: str,
     now: datetime,
+    extra_signed_headers: tuple[str, ...] = (),
 ) -> None:
     """Apply an AWS SigV4 signature to ``request`` in place.
 
     Implemented against the standard rather than pulled from botocore: the
     coordinator's whole point is that it reaches three clouds without carrying
     three clouds' SDKs.
+
+    ``extra_signed_headers`` names headers already set on the request that must
+    fall inside the signature. GCP's Workload Identity Federation needs this:
+    it rejects a ``GetCallerIdentity`` subject token whose
+    ``x-goog-cloud-target-resource`` header was not signed, because an unsigned
+    one could be swapped for a different pool by anyone who replayed the token.
     """
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = now.strftime("%Y%m%d")
@@ -487,12 +503,19 @@ def _sign_request(
 
     request.headers["host"] = url.netloc.decode("ascii")
     request.headers["x-amz-date"] = amz_date
-    request.headers["x-amz-security-token"] = credentials.session_token
 
-    signed_names = ["host", "x-amz-date", "x-amz-security-token"]
+    signed_names = ["host", "x-amz-date"]
+    # Only temporary credentials carry a session token. Sending the header with
+    # an empty value -- which is what the env-credentials path produces for
+    # long-lived keys -- is signed faithfully and then rejected by AWS, with an
+    # error about the signature rather than about the token.
+    if credentials.session_token:
+        request.headers["x-amz-security-token"] = credentials.session_token
+        signed_names.append("x-amz-security-token")
     if "content-type" in request.headers:
         signed_names.append("content-type")
-    signed_names.sort()
+    signed_names.extend(name.lower() for name in extra_signed_headers)
+    signed_names = sorted(set(signed_names))
 
     canonical_headers = "".join(
         f"{name}:{' '.join(request.headers[name].split())}\n" for name in signed_names
@@ -500,10 +523,17 @@ def _sign_request(
     signed_headers = ";".join(signed_names)
     payload_hash = hashlib.sha256(request.content or b"").hexdigest()
 
+    # SigV4 requires each path segment to be URI-encoded *twice* for every
+    # service except S3. url.path is percent-decoded, so encoding it once only
+    # reproduces the raw path and the signature silently fails to match --
+    # invisible on simple paths, fatal on AgentCore, whose invocations URL
+    # embeds a percent-encoded ARN. Start from raw_path, which is already
+    # encoded once, and encode it again.
+    raw_path = url.raw_path.split(b"?", 1)[0].decode("ascii")
     canonical_request = "\n".join(
         [
             request.method,
-            _canonical_path(url.path),
+            _canonical_path(raw_path),
             _canonical_query(url.query.decode("ascii")),
             canonical_headers,
             signed_headers,
@@ -566,7 +596,28 @@ def _signing_key(secret: str, date_stamp: str, region: str, service: str) -> byt
 # --------------------------------------------------------------------------
 
 #: Auth modes a peer can be configured with, keyed by ``{PEER}_A2A_AUTH``.
-AUTH_MODES = ("none", "google-id-token", "aws-sigv4", "entra-fic")
+#:
+#: The first four are rooted in GCP and implemented above. The last two are
+#: rooted in AWS and live in ``coordinator.aws_origin``; the registry below
+#: dispatches to them so that one function still answers "how does this leg
+#: authenticate", whichever cloud the master runs in.
+AUTH_MODES = (
+    "none",
+    "google-id-token",
+    "aws-sigv4",
+    "entra-fic",
+    "gcp-wif-aws",
+    "entra-client-secret",
+)
+
+#: Modes that require no long-lived secret. ``entra-client-secret`` is the only
+#: one that does, and the distinction is reported per leg rather than inferred,
+#: because "which legs were keyless" is the claim this project has to back.
+KEYLESS_MODES = frozenset(
+    {"none", "google-id-token", "aws-sigv4", "entra-fic", "gcp-wif-aws"}
+)
+
+_AWS_ROOTED_MODES = frozenset({"gcp-wif-aws", "entra-client-secret"})
 
 
 def _require(peer: str, mode: str, name: str) -> str:
@@ -596,6 +647,13 @@ def credentials_for(
         GCP_A2A_AUTH=google-id-token
         AWS_A2A_AUTH=aws-sigv4   AWS_A2A_ROLE_ARN=...  AWS_A2A_REGION=us-west-2
         AZURE_A2A_AUTH=entra-fic AZURE_A2A_TENANT_ID=... AZURE_A2A_CLIENT_ID=...
+
+    With the master on AWS instead, the same peers are configured differently
+    and nothing else in the mesh changes -- which is the point of step 5::
+
+        GCP_A2A_AUTH=gcp-wif-aws GCP_A2A_POOL_PROVIDER=//iam.googleapis.com/...
+                                 GCP_A2A_SERVICE_ACCOUNT=...  GCP_A2A_REGION=...
+        AZURE_A2A_AUTH=entra-client-secret   AZURE_A2A_CLIENT_SECRET=...
     """
     prefix = peer.upper()
     mode = os.getenv(f"{prefix}_A2A_AUTH", "none").strip().lower()
@@ -608,6 +666,14 @@ def credentials_for(
             f"unknown auth mode {mode!r} for peer {peer} (expected one of {AUTH_MODES})",
         )
 
+    if mode in _AWS_ROOTED_MODES:
+        # Imported here rather than at module scope: aws_origin imports the
+        # signer and the cache types from this module, and a top-level import
+        # would be circular.
+        from coordinator import aws_origin
+
+        return aws_origin.build(peer, mode, endpoint)
+
     identity = identity or WorkloadIdentity()
 
     if mode == "google-id-token":
@@ -617,12 +683,14 @@ def credentials_for(
         return GoogleIdTokenAuth(audience, identity=identity)
 
     if mode == "aws-sigv4":
+        service = os.getenv(f"{prefix}_A2A_SIGNING_SERVICE", "bedrock-agentcore")
         return AwsSigV4Auth(
             role_arn=_require(peer, mode, f"{prefix}_A2A_ROLE_ARN"),
             region=_require(peer, mode, f"{prefix}_A2A_REGION"),
             # Caller-chosen, and matched by the trust policy's :oaud condition.
             audience=os.getenv(f"{prefix}_A2A_AUDIENCE", "sts.amazonaws.com"),
-            service=os.getenv(f"{prefix}_A2A_SIGNING_SERVICE", "bedrock-agentcore"),
+            service=service,
+            extra_headers=_agentcore_headers(prefix) if service == "bedrock-agentcore" else None,
             identity=identity,
         )
 
@@ -635,9 +703,44 @@ def credentials_for(
     )
 
 
+#: AgentCore Runtime isolates sessions on this header and requires it on every
+#: request -- including the agent-card fetch, which is served from the same
+#: ``/invocations/`` path. It must be at least 33 characters.
+AGENTCORE_SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
+
+
+def _agentcore_headers(prefix: str) -> dict[str, str]:
+    """The session header AgentCore requires, stable for the life of the run.
+
+    One session per coordinator process rather than per request: AgentCore
+    keeps a runtime session alive per ID, and minting a fresh one on every call
+    would create a session per quote and burn the session quota.
+    """
+    import uuid
+
+    session_id = os.getenv(f"{prefix}_A2A_SESSION_ID") or str(uuid.uuid4())
+    if len(session_id) < 33:
+        raise AdapterError(
+            FailureKind.VALIDATION,
+            f"{prefix}_A2A_SESSION_ID must be at least 33 characters "
+            f"(AgentCore rejects shorter ones); got {len(session_id)}",
+        )
+    return {AGENTCORE_SESSION_HEADER: session_id}
+
+
 def auth_mode(auth: httpx.Auth | None) -> str:
     """Name the mode on a credential, for the matrix report and the CLI header."""
     return getattr(auth, "mode", "none") if auth is not None else "none"
+
+
+def is_keyless(mode: str) -> bool:
+    """Whether a leg running in ``mode`` needs a long-lived secret.
+
+    Reported per leg rather than inferred from the topology afterwards. The
+    whole claim of this project is which legs were keyless, and a run that
+    quietly used a client secret must not be summarised as though it had not.
+    """
+    return mode in KEYLESS_MODES
 
 
 def _service_root(endpoint: str) -> str:

@@ -60,8 +60,10 @@ def reach_consensus(
             consensus_rate=consensus_rate,
             agreed=None,
             warnings=[
-                "only one cloud responded; independent verification unavailable, "
-                "result is unverified"
+                (
+                    "only one cloud responded; independent verification unavailable, "
+                    "result is unverified"
+                )
             ],
         )
 

@@ -46,6 +46,32 @@ class StaticRateProvider:
         return target / source, self._observed_at
 
 
+class ScaledRateProvider:
+    """Wraps a provider and multiplies its rate. Fault injection, nothing else.
+
+    Exists so a *running agent* can be made to disagree, which the mesh-level
+    fault-injection tests cannot do -- they perturb a quote after the fact.
+    Demonstrating that the median holds requires a participant that actually
+    returns a divergent number over the wire.
+
+    The scale is applied to the computed rate rather than to the underlying
+    table, because these rates are cross-rates: scaling every entry by k gives
+    (k*target)/(k*source), which is the rate you started with.
+    """
+
+    def __init__(self, inner: RateProvider, scale: Decimal) -> None:
+        self._inner = inner
+        self._scale = scale
+
+    @property
+    def name(self) -> str:
+        return f"{getattr(self._inner, 'name', 'unknown')}-scaled-{self._scale}"
+
+    async def get_rate(self, source_currency: str, target_currency: str) -> tuple[Decimal, datetime]:
+        rate, observed_at = await self._inner.get_rate(source_currency, target_currency)
+        return rate * self._scale, observed_at
+
+
 class FrankfurterRateProvider:
     """Live daily reference rates from the Frankfurter API.
 

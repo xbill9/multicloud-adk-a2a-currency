@@ -1,0 +1,54 @@
+# The AWS agent, packaged for Bedrock AgentCore Runtime.
+#
+# AgentCore's A2A protocol contract is narrow and every clause below is load
+# bearing:
+#
+#   host      0.0.0.0
+#   port      9000        (not 8080, which is the HTTP protocol's port)
+#   path      /           (not /invocations, which is the HTTP protocol's path)
+#   health    GET /ping -> {"status": "Healthy"}
+#   card      GET /.well-known/agent-card.json
+#   platform  ARM64       (required, not a preference)
+#
+# The Starlette app in agents/serving.py already serves JSON-RPC at / and the
+# card at the well-known path, so it satisfies the contract unmodified. /ping
+# was added for this contract specifically -- the pre-existing /health is not
+# what AgentCore polls, and a container that fails the ping never reaches the
+# point of being invoked.
+FROM --platform=linux/arm64 python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# strands-agents is omitted: it is needed only for `llm` mode, and the matrix
+# runs `direct` so a red cell is unambiguously a protocol failure rather than a
+# throttled Bedrock call. See "keep the two axes separate" in
+# docs/DEPLOYMENT_PLAN.md.
+RUN pip install \
+      "a2a-sdk[http-server]" \
+      pydantic \
+      httpx \
+      uvicorn
+
+COPY pyproject.toml README.md ./
+COPY agents ./agents
+COPY clients ./clients
+COPY coordinator ./coordinator
+COPY protocol ./protocol
+
+RUN pip install --no-deps -e .
+
+# PUBLIC_URL is set at deploy time, once the runtime ARN exists, because the
+# card must advertise the AgentCore invocations URL rather than this
+# container's bind address. Without it the card advertises 0.0.0.0:9000 --
+# interop finding 2, the defect that breaks ADK's own client against a hosted
+# server and that only reproduces once bind and dial addresses differ.
+ENV HOST=0.0.0.0 \
+    PORT=9000 \
+    CURRENCY_MODEL_MODE=direct
+
+EXPOSE 9000
+CMD ["python", "-m", "agents.aws.server"]

@@ -42,7 +42,7 @@ class A2ASdkClient(A2AQuoteClient):
 
     async def _send(self, prompt: str) -> str:
         from a2a.client import A2ACardResolver, ClientConfig, create_client
-        from a2a.helpers import get_message_text, get_text_parts, new_text_message
+        from a2a.helpers import get_message_text, new_text_message
         from a2a.types import Role, SendMessageRequest
 
         # local_address pins the socket to IPv4; IPv6 to some hosts hangs in

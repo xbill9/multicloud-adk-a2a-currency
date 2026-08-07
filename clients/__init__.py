@@ -27,4 +27,4 @@ def load_client(stack: str, endpoint: str, **kwargs) -> A2AQuoteClient:
     raise ValueError(f"unknown client stack: {stack!r} (expected one of {CLIENT_STACKS})")
 
 
-__all__ = ["A2AQuoteClient", "CLIENT_STACKS", "load_client"]
+__all__ = ["CLIENT_STACKS", "A2AQuoteClient", "load_client"]

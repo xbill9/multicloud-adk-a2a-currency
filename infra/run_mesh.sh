@@ -10,7 +10,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${PYTHON:-$REPO/.venv/bin/python}"
+# System interpreter, not a virtualenv -- see CLAUDE.md.
+PYTHON="${PYTHON:-python3}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"
 AGENTS=("gcp:10001" "aws:10002" "azure:10003")
 
@@ -24,7 +25,16 @@ start() {
       echo "$name already running (pid $(cat "$pidfile"))"
       continue
     fi
-    PORT="$port" nohup "$PYTHON" -m "agents.$name.server" \
+    # Per-agent fault injection: CURRENCY_RATE_SCALE_AWS=1.35 skews only that
+    # agent, which is what makes "the median holds" demonstrable rather than
+    # merely asserted. Unset for every agent by default.
+    local upper scale_var scale
+    upper="$(echo "$name" | tr '[:lower:]' '[:upper:]')"
+    scale_var="CURRENCY_RATE_SCALE_${upper}"
+    scale="${!scale_var:-}"
+
+    PORT="$port" CURRENCY_RATE_SCALE="$scale" \
+      nohup "$PYTHON" -m "agents.$name.server" \
       >"$RUN_DIR/$name.log" 2>&1 &
     echo $! >"$pidfile"
     echo "$name starting on :$port (pid $!)"
@@ -68,10 +78,21 @@ status() {
   done
 }
 
+# Stop one agent, to exercise degradation rather than assert it.
+kill_one() {
+  local name="${1:?usage: kill <gcp|aws|azure>}"
+  local pidfile="$RUN_DIR/$name.pid"
+  [[ -f "$pidfile" ]] || { echo "$name is not running" >&2; return 1; }
+  local pid; pid="$(cat "$pidfile")"
+  kill "$pid" 2>/dev/null && echo "$name killed (pid $pid)"
+  rm -f "$pidfile"
+}
+
 case "${1:-start}" in
   start) start ;;
   stop) stop ;;
   restart) stop; sleep 1; start ;;
   status) status ;;
-  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+  kill) kill_one "${2:-}" ;;
+  *) echo "usage: $0 {start|stop|restart|status|kill <agent>}" >&2; exit 2 ;;
 esac

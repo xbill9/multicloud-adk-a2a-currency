@@ -81,10 +81,22 @@ def build_app(executor: AgentExecutor, card: AgentCard) -> Starlette:
     async def health(request):
         return JSONResponse({"status": "ok", "agent": card.name})
 
+    async def ping(request):
+        """AgentCore Runtime's health contract.
+
+        Required verbatim: ``status`` must be ``Healthy`` or ``HealthyBusy``.
+        Deliberately omits ``time_of_last_update`` -- a timestamp that advances
+        on every ping reads as a continuous status change, which stops the idle
+        session timeout from ever firing and leaks sessions until MaxLifetime.
+        Omitting it lets the platform track changes itself.
+        """
+        return JSONResponse({"status": "Healthy"})
+
     return Starlette(
         routes=[
             *create_agent_card_routes(card),
             *create_jsonrpc_routes(handler, "/"),
             Route("/health", health, methods=["GET"]),
+            Route("/ping", ping, methods=["GET"]),
         ]
     )

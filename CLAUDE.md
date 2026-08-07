@@ -12,6 +12,44 @@ caught.
 The README's "Not done: **Nothing is deployed**" is the honest state. Keep it
 honest until it changes.
 
+## Ground rule: no virtualenvs, latest everything
+
+**Never create or use a virtualenv.** No `uv venv`, no `python -m venv`, no
+`.venv`. Install to the system interpreter with `uv pip install --system` and
+run with `python3 -m pytest`. If a doc anywhere still tells you to make one,
+that doc is wrong and should be fixed rather than followed.
+
+**Use the latest version of every package, runtime, and compiler.** Latest
+Python, latest base images, latest SDKs. Do not pin defensively, do not carry a
+pin forward because it was once true, and do not install an old version because
+a document mentions one.
+
+**When the latest stack breaks something, fix what broke.** Do not downgrade.
+Pinning back is not a fix, it is a deferral — the break is still there, it now
+fires at a worse moment, and by then the cause is buried under however many
+releases were skipped. Chasing old packages is how a project accumulates
+problems it cannot date.
+
+The one legitimate reason to pin is a **measured** failure you cannot fix from
+here, and such a pin owes two things: a comment saying which failure, and a
+re-test against latest whenever the area is touched. A pin nobody re-tests is
+indistinguishable from rot.
+
+This repo had two such pins and both are now gone. `google-adk==2.5.0` and
+`a2a-sdk==1.1.2` existed because `google-adk` 2.4.0 imports an `a2a-sdk` 1.x
+removal (finding 4 in `docs/INTEROP.md`). Retested 2026-08-02: `to_a2a` imports
+and serves on `google-adk` 2.6.1, the suite passes, and the pins are removed
+from `pyproject.toml`, both Dockerfiles and the README.
+
+Two lessons from that, worth applying to the next pin:
+
+- **`a2a-sdk==1.1.2` was never load-bearing** — 1.1.2 is just the latest
+  release, so the pin was redundant and had been repeated across four files as
+  though it were a finding.
+- **"latest of each is not a safe assumption" was true on a date and then read
+  as a law.** That is exactly how a pin outlives its defect. Write the *measured
+  failure* into the comment, never the general warning.
+
 ## Cross-cloud auth: the plan
 
 Every callee here consumes external OIDC — AWS IAM OIDC providers, Entra

@@ -17,44 +17,74 @@ because locally those two addresses are the same.
 
 See [`docs/INTEROP.md`](docs/INTEROP.md).
 
+## The demo
+
+One command, four acts — the last two are the point:
+
+```console
+$ ./infra/demo.sh
+
+1. Three clouds, one question       three vendors' frameworks, one answer
+2. The interop matrix               3 client SDKs x 3 serving stacks
+3. A cloud goes offline             the median degrades instead of failing
+4. A cloud lies                     the median holds; the outlier is named
+```
+
+Any demo can show three green ticks. The claim this project makes is about
+what happens when a participant is *wrong*, which is why acts 3 and 4 exist:
+
+```console
+100 USD = 92 EUR @ 0.92 [3/3 clouds, DISAGREED]
+    gcp                  92 (229ms)
+    aws               124.2 (25ms)
+    azure                92 (24ms)
+  warning: 1 of 3 clouds disagree by more than 0.50% (aws)
+```
+
 ## The matrix
 
 ```console
 $ ./infra/run_mesh.sh start
-$ python -m matrix.runner
+$ python3 -m matrix.runner
 
 A2A interop matrix  (100 USD -> EUR, GBP, brain=direct)
 
 client \ server  gcp               aws               azure
 -----------------------------------------------------------------------
-a2a-sdk          ok 69ms           ok 9ms            ok 10ms
-agent-framework  ok 31ms           ok 7ms            ok 8ms
-google-adk       ok 864ms          ok 10ms           ok 11ms
+a2a-sdk          ok 220ms          ok 12ms           ok 15ms
+agent-framework  ok 301ms          ok 21ms           ok 16ms
+google-adk       ok 1831ms         ok 14ms           ok 12ms
 
 9/9 attempted cells succeeded
 ```
 
+Latencies are loopback, direct-brain, single runs on one machine — they order
+the stacks and nothing more. An earlier revision of this table recorded
+69/31/864ms for the `gcp` column on different hardware and an older ADK.
+
 Three client SDKs × three natively-served agents. Every cell is one real A2A
 call; a failed cell records which layer broke (`transport`, `protocol`,
-`timeout`, `authentication`) rather than just failing.
+`timeout`, `authentication`, `provider`) rather than just failing — the
+classification walks the vendor SDK's exception chain, because every stack here
+wraps the real cause in a type of its own.
 
 ## The mesh
 
 ```console
-$ python -m coordinator.cli 100 USD EUR JPY
+$ python3 -m coordinator.cli 100 USD EUR JPY
 
 participants: gcp, aws, azure
 
 100 USD = 92 EUR @ 0.92 [3/3 clouds, agreed]
-    gcp                  92 (77ms)
-    aws                  92 (14ms)
-    azure                92 (14ms)
+    gcp                  92 (433ms)
+    aws                  92 (27ms)
+    azure                92 (31ms)
 100 USD = 15000 JPY @ 150 [3/3 clouds, agreed]
-    gcp               15000 (77ms)
-    aws               15000 (14ms)
-    azure             15000 (14ms)
+    gcp               15000 (433ms)
+    aws               15000 (27ms)
+    azure             15000 (31ms)
 
-elapsed 77ms
+elapsed 434ms
 ```
 
 Consensus is the **median**, not a primary-plus-verifier pair, so a single
@@ -116,9 +146,10 @@ leg. That is available here (`CURRENCY_RATE_PROVIDER=frankfurter`,
 2. It folds upstream HTTP latency, rate limits, and outages into numbers meant
    to measure A2A. A red cell should never mean "Frankfurter throttled us".
 
-Disagreement is therefore tested by **fault injection** — perturbing one
-participant's rate and asserting it is named as the outlier
-(`tests/test_mesh.py`) — rather than by hoping three models diverge. Live rates
+Disagreement is therefore tested by **fault injection** rather than by hoping
+three models diverge, at two levels: `tests/test_mesh.py` perturbs a quote
+after the fact, and `CURRENCY_RATE_SCALE_<AGENT>` skews a *running* agent so
+the median can be watched holding (act 4 of `./infra/demo.sh`). Live rates
 remain useful as an end-to-end validation pass, which is what they are kept for.
 
 ## Setup
@@ -126,16 +157,17 @@ remain useful as an end-to-end validation pass, which is what they are kept for.
 Requires Python 3.13 and `uv`.
 
 ```bash
-uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python \
-  "a2a-sdk[http-server]==1.1.2" "google-adk==2.5.0" \
+uv pip install --system \
+  "a2a-sdk[http-server]" google-adk \
   agent-framework-a2a agent-framework-core \
-  "pydantic>=2.10" "httpx>=0.28" "uvicorn>=0.30" "pytest>=8.3" "pytest-asyncio>=0.25"
-uv pip install --python .venv/bin/python -e .
+  pydantic httpx uvicorn pytest pytest-asyncio
+uv pip install --system -e .
 ```
 
-Those two version pins matter: `google-adk` 2.4.0 cannot serve A2A v1.0 —
-see finding 4 in `docs/INTEROP.md`.
+Latest of everything, no virtualenv — see `CLAUDE.md`. `google-adk` 2.4.0 could
+not serve A2A v1.0 (finding 4 in `docs/INTEROP.md`), but that is a fact about
+2.4.0: retested 2026-08-02 on `google-adk` 2.6.1 + `a2a-sdk` 1.1.2 and it
+serves.
 
 `strands-agents` is needed only for the AWS agent's `llm` mode; every other
 path runs without it.
@@ -145,8 +177,8 @@ path runs without it.
 ```bash
 ./infra/run_mesh.sh start        # three agents on :10001 :10002 :10003
 ./infra/run_mesh.sh status
-python -m matrix.runner --json report.json
-python -m coordinator.cli 100 USD EUR GBP
+python3 -m matrix.runner --json report.json
+python3 -m coordinator.cli 100 USD EUR GBP
 ./infra/run_mesh.sh stop
 ```
 
@@ -164,7 +196,7 @@ Tests are hermetic by default; the live suite skips itself unless the mesh is
 up.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # 71 passed
+python3 -m pytest tests/ -q     # 92 passed, 11 skipped
 ```
 
 ## Status
