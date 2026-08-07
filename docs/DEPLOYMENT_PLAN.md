@@ -78,9 +78,17 @@ a result; that is what step 3 is for.
    "What the first leg actually proved" below.
 2. **GCP→AWS** — metadata mint → STS `AssumeRoleWithWebIdentity` → SigV4.
    Mechanism already proven elsewhere; port it rather than reinvent.
+   **Done, 2026-08-02.** `./infra/deploy_aws.sh` — AgentCore Runtime
+   `currency_aws`, `us-west-2`, SigV4 (no `--authorizer-configuration`), role
+   `currency-aws-federated` trusting `accounts.google.com`.
 3. **GCP→Azure** — Entra Federated Identity Credential trusting
    `accounts.google.com`, subject = the SA's unique ID. This is the unproven
-   one and the one worth writing up.
+   one and the one worth writing up. **Done, 2026-08-02.**
+   `./infra/deploy_azure.sh` — Container App `currency-azure`, `westus2`, FIC
+   subject `101913873674028276612`, plus the enforcement half described below.
+
+All three legs were then exercised together, keyless, on 2026-08-07: see "The
+whole mesh, deployed" and "What the controls actually proved".
 
 ## What the first leg actually proved (2026-07-31)
 
@@ -132,6 +140,83 @@ reproduces — and that the client it breaks is ADK's own.
 This is the project's thesis reproducing on schedule. Code-complete plus a
 green suite was, again, not a result.
 
+## The whole mesh, deployed (2026-08-07)
+
+Three clouds, three vendors' hosting, one coordinator, no stored secret:
+
+```console
+$ ./infra/deploy_gcp.sh run
+
+participants: gcp (google-id-token), aws (aws-sigv4), azure (entra-fic)
+100 USD = 92 EUR @ 0.92 [3/3 clouds, agreed]
+    gcp                  92 (15520ms)
+    aws                  92 (1116ms)
+    azure                92 (24127ms)
+100 USD = 15000 JPY @ 150 [3/3 clouds, agreed]
+elapsed 25012ms
+```
+
+Everything scales to zero, so that run is three simultaneous cold starts. The
+warm shape, from 2026-08-03: `gcp 1006ms, aws 902ms, azure 476ms, elapsed
+1770ms`. **Consensus latency is ≈ max(legs), not their sum** — 1770 against a
+1006ms slowest leg — which confirms the coordinator issues all three
+concurrently rather than assuming it. Cold, the same relation holds: 25012
+against 24127.
+
+The Azure leg is cold on *every* run an hour apart — 24127ms, then 21848ms —
+because the deployed Container App sits at `minReplicas: 0` while
+`deploy_azure.sh` writes `--min-replicas 1`. That drift is the whole
+explanation for the slowest column in both tables, and it is configuration, not
+Container Apps being twenty seconds slower than the other two clouds. Either
+fix the deployed app or stop quoting cold Azure numbers; do not do neither.
+
+The deployed 3×3 matrix is in [`INTEROP.md`](INTEROP.md#the-same-matrix-deployed-2026-08-07):
+**8/9**, the single red cell being finding 2, still ADK's own client against
+ADK's own server.
+
+## What the controls actually proved (2026-08-07)
+
+`./infra/deploy_gcp.sh verify`. Every probe runs one leg alone — the mesh
+degrades on purpose, so a three-cloud run with one credential removed still
+reaches quorum and exits 0, which reads as "no denial" and is not.
+
+| probe | leg | result |
+|---|---|---|
+| unauthenticated `curl`, `/health` and card | gcp | **403** |
+| as deployed | gcp | answered |
+| as deployed | aws | answered |
+| as deployed | azure | answered |
+| `GCP_A2A_AUTH=none` | gcp | **denied** |
+| `AWS_A2A_AUTH=none` | aws | **denied** |
+| `AZURE_A2A_AUTH=none` | azure | **denied** |
+| right identity, `GCP_A2A_AUDIENCE` pointed elsewhere | gcp | **denied** |
+
+Seven for seven. Three positive controls first, because a denial means nothing
+until you know the leg answers at all — and the positive controls run through
+the same job, same image, same env, with one variable changed by an
+execution-time override rather than a redeploy. A control that tests a
+configuration nothing else ever runs is not a control.
+
+**This is the claim the mesh could not previously make.** Before these, the run
+envelope's `gcp (google-id-token), aws (aws-sigv4), azure (entra-fic)` recorded
+only that a credential had been *sent*. Two of the three endpoints could have
+been answering anyone, and on Azure that was briefly true — see "The Azure
+trap" above.
+
+The wrong-audience row still proves less than it appears to. Audience is
+caller-chosen, and Cloud Run has already been observed accepting a user token
+whose audience was gcloud's own OAuth client ID. What it does separate is "the
+token was rejected" from "no token was sent", which is worth having.
+
+Not proven by any of this: that the AWS role's trust policy is *scoped* the way
+`deploy_aws.sh` writes it. The role was deployed with `Resource` limited to the
+runtime ARN and `ARN/*`, and every AWS cell including the card fetch succeeds —
+which would answer open question 2 in the affirmative and contradict the
+predecessor finding. But the deployed policy has not been read back since, and
+until it is, the possibility that it was widened to `"*"` during the 2026-08-02
+session is open. `aws iam get-role-policy --role-name currency-aws-federated
+--policy-name invoke-currency-agent` settles it in one command.
+
 ## 4. Re-run the matrix hosted, and expect it to move
 
 Current cells are 7–864 ms because everything is local and `direct`-brain. The
@@ -166,6 +251,45 @@ an evening debugging A2A that is not broken.
    and data-plane denials do not reach CloudTrail by default. Any deployment
    here that touches AgentCore inherits this as unfinished business — and
    shipping `Resource: "*"` must be disclosed, not glossed.
-3. **Does Entra FIC match Google tokens on `sub` or `azp`?** The AWS side had
-   exactly this trap (`:aud` silently meaning `azp`). Check before assuming the
-   mirror works the obvious way.
+3. ~~**Does Entra FIC match Google tokens on `sub` or `azp`?**~~ **Answered,
+   2026-08-02.** `sub`, and it means what it says. The FIC's `subject` is the
+   coordinator SA's numeric unique ID (`101913873674028276612`) and the
+   exchange succeeds; there is no Entra equivalent of the AWS `:aud`/`azp`
+   trap. Its `audiences` field is likewise literal, but is not a choice —
+   `api://AzureADTokenExchange` is the only value Entra accepts there.
+
+   The trap on this side turned out to be somewhere else entirely: see below.
+
+## The Azure trap: a FIC is half a control
+
+The AWS and GCP legs are authenticated by the thing that receives the call —
+IAM authorizes `InvokeAgentRuntime`, Cloud Run authorizes `run.invoker`. On
+Container Apps the ingress is **public by default**, and nothing about creating
+a Federated Identity Credential changes that.
+
+So the first version of this leg had a working FIC, a coordinator presenting a
+correctly-exchanged Entra token, `entra-fic` printed in the run envelope — and
+an endpoint that would have answered a stranger with curl just as happily. The
+deploy script said so in its own `verify` output and it was still easy to read
+the green run as proof of an identity story it was not testing.
+
+The two halves are separate and both are load-bearing:
+
+- **`deploy_azure.sh fic`** decides *who can obtain* a token for this app. It is
+  where the binding lives: subject = one numeric principal.
+- **`deploy_azure.sh auth`** decides whether the app *demands* one. Container
+  Apps' built-in auth, issuer and audience both pinned,
+  `unauthenticatedClientAction: Return401`.
+
+`Return401` rather than the default `RedirectToLoginPage` matters more than it
+looks: a 302 to an interactive sign-in page arrives at an A2A client as a 200
+carrying HTML, which it reports as a parse failure. That is this project's
+recurring trap again — **an error reported at the wrong layer** — and it would
+have sent a reader looking for a protocol bug in a leg whose only problem was
+that it was not logged in.
+
+The generalisation, which is the part worth keeping: **an auth mode reported by
+the caller is a claim about the caller.** It says a credential was sent, never
+that one was required. Only a negative control can tell those apart, which is
+why `./infra/deploy_gcp.sh verify` exists and why every probe in it isolates a
+single leg.

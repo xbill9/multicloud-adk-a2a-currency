@@ -5,10 +5,16 @@
 #
 #   ./infra/deploy_azure.sh deploy     # RG, ACR, env, container app
 #   ./infra/deploy_azure.sh fic        # Entra app registration + FIC
+#   ./infra/deploy_azure.sh auth       # enforce Entra in front of the ingress
 #   ./infra/deploy_azure.sh env        # env vars to add to the GCP master
 #   ./infra/deploy_azure.sh verify     # negative controls -- run these
 #   ./infra/deploy_azure.sh url
 #   ./infra/deploy_azure.sh destroy
+#
+# `fic` and `auth` are two halves of one story and neither is sufficient. The
+# FIC decides who can *obtain* a token for this app; `auth` decides whether the
+# app *demands* one. Ship only the first and the leg reports `entra-fic` while
+# answering anyone who asks -- a claim about the caller, dressed as a control.
 #
 # This is the unproven leg. GCP->GCP was trivial and GCP->AWS was a port of a
 # mechanism already working elsewhere; nothing here has ever been exercised
@@ -144,6 +150,36 @@ print(json.dumps({
   echo "clientId: $app_id"
 }
 
+# The enforcement half. Container Apps' built-in auth validates the token at
+# the ingress, before the request reaches the container, so the agent stays
+# credential-free and identical to the one that runs locally -- the same
+# property Cloud Run gives the GCP leg and IAM gives the AWS one.
+auth_enforce() {
+  local app_id tenant
+  app_id="$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv 2>/dev/null)"
+  [[ -z "$app_id" ]] && { echo "no app registration; run: $0 fic" >&2; exit 1; }
+  tenant="$(az account show --query tenantId -o tsv)"
+
+  # Pin both. The issuer alone would accept any app in the tenant; the audience
+  # alone would accept a token minted for this app by a different issuer. And
+  # neither says *who* -- that is the FIC's subject condition, one layer up.
+  az containerapp auth microsoft update -n "$APP" -g "$RG" \
+    --client-id "$app_id" \
+    --issuer "https://sts.windows.net/${tenant}/" \
+    --allowed-audiences "$app_id" \
+    --yes -o none
+
+  # Return401, never the default RedirectToLoginPage. This is an API: a 302 to
+  # an interactive sign-in page is a 200-with-HTML to an A2A client, which then
+  # reports a parse error and sends you looking for a protocol bug.
+  az containerapp auth update -n "$APP" -g "$RG" \
+    --enabled true --unauthenticated-client-action Return401 -o none
+
+  echo "ingress now rejects unauthenticated callers with 401"
+  echo "issuer  : https://sts.windows.net/${tenant}/"
+  echo "audience: ${app_id}"
+}
+
 env_block() {
   local app_id
   app_id="$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv)"
@@ -159,14 +195,42 @@ EOF
 }
 
 verify() {
-  local url; url="$(app_url)"
-  echo "1. health                -> $(curl -s -o /dev/null -w '%{http_code}' -m 15 "${url}/health")"
-  echo "2. agent card            -> $(curl -s -o /dev/null -w '%{http_code}' -m 15 "${url}/.well-known/agent-card.json")"
-  echo "3. card advertises       -> $(curl -s -m 15 "${url}/.well-known/agent-card.json" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("url") or [i.get("url") for i in d.get("additionalInterfaces",d.get("supportedInterfaces",[]))])' 2>/dev/null)"
+  local url health card fic sub expected
+  url="$(app_url)"
+
+  echo "an authenticated leg is unproven without negative controls."
   echo
-  echo "NOTE: ingress is currently PUBLIC. Until Entra auth is enforced in front"
-  echo "of it, this leg proves the agent and the serving stack, NOT the identity"
-  echo "story -- and the mesh's keyless claim does not yet cover it."
+
+  health="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${url}/health")"
+  card="$(curl -s -o /dev/null -w '%{http_code}' -m 25 "${url}/.well-known/agent-card.json")"
+  echo "1. no token, /health                  -> ${health}   (expect 401)"
+  echo "2. no token, agent card               -> ${card}   (expect 401; discovery"
+  echo "   is privileged here exactly as on the other two clouds)"
+
+  echo "3. enforcement config actually stored:"
+  az containerapp auth show -n "$APP" -g "$RG" \
+    --query '{action:globalValidation.unauthenticatedClientAction,
+              issuer:identityProviders.azureActiveDirectory.registration.openIdIssuer,
+              audiences:identityProviders.azureActiveDirectory.validation.allowedAudiences}' \
+    -o json 2>/dev/null | sed 's/^/   /'
+
+  # The binding, which is the part neither a status code nor the audience list
+  # can show: only one principal in the world can obtain a token for that
+  # audience, and this is where that is written down.
+  echo "4. FIC subject vs the master SA's numeric unique ID:"
+  fic="$(az ad app federated-credential list \
+          --id "$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv)" \
+          --query '[0].subject' -o tsv 2>/dev/null || true)"
+  expected="$(master_sa_unique_id)"
+  sub="${fic:-<none>}"
+  echo "   FIC subject : ${sub}"
+  echo "   master SA   : ${expected}"
+  [[ "$sub" == "$expected" ]] \
+    && echo "   bound to the one principal that can mint the assertion" \
+    || echo "   MISMATCH -- the audience check is then the only control, and it is not one"
+
+  echo
+  echo "The positive control is the GCP master: ./infra/deploy_gcp.sh verify"
 }
 
 destroy() {
@@ -180,9 +244,10 @@ destroy() {
 case "${1:-deploy}" in
   deploy) deploy ;;
   fic) fic ;;
+  auth) auth_enforce ;;
   env) env_block ;;
   verify) verify ;;
   url) app_url ;;
   destroy) destroy ;;
-  *) echo "usage: $0 {deploy|fic|env|verify|url|destroy}" >&2; exit 2 ;;
+  *) echo "usage: $0 {deploy|fic|auth|env|verify|url|destroy}" >&2; exit 2 ;;
 esac

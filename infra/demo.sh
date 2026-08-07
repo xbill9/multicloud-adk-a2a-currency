@@ -69,8 +69,14 @@ run "$PYTHON" -m coordinator.cli 100 USD EUR
 
 rule "What this demo does not show"
 cat <<'EOF'
-  - Nothing here is deployed. All three agents are local; no measurement
-    above crosses a cloud boundary.
+  - Nothing in THIS SCRIPT is deployed. All three agents here are local and
+    no measurement above crosses a cloud boundary -- but all three are also
+    deployed for real, and acts 1 and 2 have hosted equivalents:
+      ./infra/deploy_gcp.sh run       three clouds, one question
+      ./infra/deploy_gcp.sh matrix    the 3x3 against hosted servers
+      ./infra/deploy_gcp.sh verify    the negative controls
+    Acts 3 and 4 stay local on purpose: killing and skewing a participant is
+    something you can only do to an agent you own the process of.
   - Latencies are loopback and direct-brain (no model). They measure protocol
     and framework overhead, nothing else.
   - The three agents read the same fixture table, so agreement in act 1 is by

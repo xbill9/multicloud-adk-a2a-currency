@@ -7,18 +7,58 @@ reading specifications. Run `python -m matrix.runner` to reproduce.
 
 Nine directed calls: three client SDKs against three natively-served agents.
 Latencies are local, direct-brain (no model), and measure protocol overhead
-only.
+only — single runs on one machine, 2026-08-07. They order the stacks and
+nothing more; earlier revisions of this table recorded 69/31/864ms for the
+`gcp` column on different hardware and an older ADK.
 
 | client \ server | GCP (ADK `to_a2a`) | AWS (a2a-sdk routes) | Azure (AF `A2AExecutor`) |
 |---|---|---|---|
-| `a2a-sdk` 1.1.2 | ok 69ms | ok 9ms | ok 10ms \* |
-| `agent-framework` `A2AAgent` | ok 31ms | ok 7ms | ok 8ms |
-| `google-adk` `RemoteA2aAgent` | ok 864ms | ok 10ms | ok 11ms |
+| `a2a-sdk` | ok 163ms | ok 9ms | ok 9ms \* |
+| `agent-framework` `A2AAgent` | ok 135ms | ok 7ms | ok 8ms |
+| `google-adk` `RemoteA2aAgent` | ok 922ms | ok 8ms | ok 8ms |
 
 \* only after the fix in finding 2.
 
 All nine cells pass — but two of them only after working around a defect, and
 neither defect was visible from either vendor's own documentation or tests.
+
+## The same matrix, deployed (2026-08-07)
+
+All three agents now run on their own vendor's hosting, called from the
+coordinator as a Cloud Run job in `us-central1`. **This is the first table here
+where the calls actually cross cloud boundaries**, and it is the one that
+counts; every other latency in this document is loopback.
+
+| client \ server | GCP `us-central1` | AWS `us-west-2` | Azure `westus2` |
+|---|---|---|---|
+| `a2a-sdk` | ok 15484ms | ok 1288ms | ok 1542ms |
+| `agent-framework` | ok 477ms | ok 5700ms | ok 360ms |
+| `google-adk` | **transport** | ok 5913ms | ok 433ms |
+
+**8/9. The one red cell is finding 2, and it is still ADK's own client against
+ADK's own server.** That is the same failure the single-column deployed run
+found on 2026-07-31, now reproduced with the other two clouds beside it as
+controls: the two servers that advertise a `PUBLIC_URL` are reachable from all
+three client stacks, and the one that advertises its bind address is not
+reachable from the one client that routes by card.
+
+Read the latencies with care, and preferably not at all:
+
+- **Every service scales to zero**, so the first call into a column pays a cold
+  start and the rest do not. `a2a-sdk` is simply the first row the runner
+  executes; the 15.5s in its GCP cell is a container starting, not a stack
+  being slow, and `agent-framework` hits the same server 477ms later.
+- The 5.7s and 5.9s AWS cells are the exception to that reading — they come
+  *after* a warm 1288ms cell in the same column, so AgentCore is doing
+  something per-session that a cold start does not explain. Unexplained, and
+  flagged rather than smoothed over.
+- These are single runs. There is no warm/cold distribution behind any number
+  in this table, which is exactly why it should not be quoted as a comparison
+  between clouds.
+
+The predecessor series' prediction holds in shape: 0.4–1.5s to warm containers,
+and nothing here approaches the 18.8–25.1s it measured against hosted *model*
+runtimes, because every agent in this table is `direct`-brain.
 
 ## Finding 1: a completed Task carries the answer in a different field per vendor
 
@@ -144,9 +184,21 @@ Ergonomics, not correctness, but it shapes what you can fix:
 
 `google-adk` 2.4.0 imports `a2a.server.apps.A2AStarletteApplication`, which
 `a2a-sdk` 1.x removed. Installing current `a2a-sdk` alongside it produces a
-`ModuleNotFoundError` at import of `to_a2a`. The working pair is **`google-adk`
-2.5.0 + `a2a-sdk` 1.1.2**, pinned in this repo's venv. A2A v1.0 is recent
-enough that "latest of each" is not yet a safe assumption.
+`ModuleNotFoundError` at import of `to_a2a`. The first working pair was
+**`google-adk` 2.5.0 + `a2a-sdk` 1.1.2**, and this repo pinned both.
+
+**The pins are gone, and how they were removed is the more useful finding.**
+Retested 2026-08-02: `to_a2a` imports and serves on `google-adk` 2.6.1, the
+suite passes, and both pins came out of `pyproject.toml`, both Dockerfiles and
+the README. `a2a-sdk==1.1.2` turned out never to have been load-bearing at all
+— 1.1.2 was simply the latest release when the pin was written, so it had been
+copied across four files as though it were a finding.
+
+The conclusion originally drawn here, that "latest of each is not yet a safe
+assumption", was true on a date and then read as a law. That is precisely how a
+pin outlives the defect that justified it. Write the *measured failure* into the
+comment, never the general warning — and re-test whenever the area is touched,
+because a pin nobody re-tests is indistinguishable from rot.
 
 ## Found by deploying, not by testing
 
@@ -177,9 +229,13 @@ run where every participant 401'd reported green.
   That is the point — see the note on Frankfurter in the README. Numeric
   consensus is exercised by fault injection, not by hoping three models
   disagree.
-- **Only the GCP agent is deployed.** The deployed column above is one server,
-  not a matrix. AWS and Azure remain local, so no cell in this document
-  measures a genuinely cross-cloud hop — and the GCP one is coordinator and
-  agent both in GCP, an in-cloud hop rather than a cross-cloud one.
-- The deployed latencies (424ms–1027ms) are a single execution each, cold, with
-  no warm/cold distribution behind them.
+- **The GCP column is an in-cloud hop.** Coordinator and agent are both in
+  `us-central1`, so that column measures Cloud Run to Cloud Run and must not be
+  counted toward the interop claim the way the AWS and Azure columns can.
+- **The deployed latencies are single executions**, cold or warm depending only
+  on where in the run order a cell fell. There is no distribution behind any of
+  them, and they should not be read as a comparison between clouds.
+- **Nothing here measures a model.** Every agent is `direct`-brain, which is the
+  point — a red cell is a protocol failure and never a model that wandered
+  off-format. It also means these numbers say nothing about what an `llm`-mode
+  mesh would cost, and the predecessor series measured 18.8–25.1s for that.

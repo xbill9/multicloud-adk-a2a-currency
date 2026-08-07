@@ -9,13 +9,18 @@ It exists to answer a question the two-cloud version could not: **does A2A
 actually interoperate between vendors, or does every pair need a workaround?**
 
 Short answer: locally, all nine client/server pairs work — two only after
-working around defects that neither vendor's own tests would catch. Deployed,
-that number drops: against the hosted GCP agent, **ADK's own client cannot
-reach ADK's own server**, because `to_a2a()` advertises the container's bind
-address and `RemoteA2aAgent` believes it. Both halves pass Google's tests,
-because locally those two addresses are the same.
+working around defects that neither vendor's own tests would catch. Deployed on
+all three vendors' hosting, it is **8/9**: against the hosted GCP agent, **ADK's
+own client cannot reach ADK's own server**, because `to_a2a()` advertises the
+container's bind address and `RemoteA2aAgent` believes it. Both halves pass
+Google's tests, because locally those two addresses are the same.
 
-See [`docs/INTEROP.md`](docs/INTEROP.md).
+Everything crossing a cloud boundary here is authenticated with **no stored
+secret**, and each of those three legs has a negative control behind it rather
+than a self-reported mode.
+
+See [`docs/INTEROP.md`](docs/INTEROP.md) and
+[`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md).
 
 ## The demo
 
@@ -51,9 +56,9 @@ A2A interop matrix  (100 USD -> EUR, GBP, brain=direct)
 
 client \ server  gcp               aws               azure
 -----------------------------------------------------------------------
-a2a-sdk          ok 220ms          ok 12ms           ok 15ms
-agent-framework  ok 301ms          ok 21ms           ok 16ms
-google-adk       ok 1831ms         ok 14ms           ok 12ms
+a2a-sdk          ok 163ms          ok 9ms            ok 9ms
+agent-framework  ok 135ms          ok 7ms            ok 8ms
+google-adk       ok 922ms          ok 8ms            ok 8ms
 
 9/9 attempted cells succeeded
 ```
@@ -95,17 +100,27 @@ degrade the quorum instead of failing the run.
 ## Architecture
 
 ```text
-              coordinator/cli.py  (any machine)
+           coordinator/cli.py  (Cloud Run job, us-central1)
                         |
         +---------------+---------------+
         | A2A v1.0      | A2A v1.0      | A2A v1.0
+        | ID token      | SigV4         | Entra token
         v               v               v
   Google Cloud      AWS              Azure
   ADK LlmAgent      Strands Agent    Agent Framework Agent
   Gemini            Bedrock Nova     Foundry model
   served by         served by        served by
   to_a2a()          a2a-sdk routes   A2AExecutor
+  on               on                on
+  Cloud Run        AgentCore Runtime Container Apps
+  us-central1      us-west-2         westus2
 ```
+
+Each credential is minted from the coordinator's own workload identity: a
+Google ID token for Cloud Run, an STS `AssumeRoleWithWebIdentity` exchange into
+SigV4 for AgentCore, and an Entra Federated Identity Credential exchange for
+Container Apps. Three clouds, three mechanisms, **no stored secret** — the
+coordinator's host is the only thing that makes that possible.
 
 The three serving stacks are genuinely different code paths — that is what the
 matrix measures. The client side is symmetric: any of the three client SDKs can
@@ -182,21 +197,40 @@ python3 -m coordinator.cli 100 USD EUR GBP
 ./infra/run_mesh.sh stop
 ```
 
-The GCP leg can also be run deployed and authenticated. The coordinator runs as
-a Cloud Run job rather than locally because a user credential cannot mint an
-arbitrary-audience ID token at all — there is no laptop equivalent of this path.
+## Deployed
+
+All three agents also run on their own vendor's hosting, reached from one
+coordinator with **no long-lived secret anywhere in the mesh**. Deploy each
+cloud with its own script, then wire the coordinator to all three:
 
 ```bash
-./infra/deploy_gcp.sh deploy     # service + coordinator job + roles/run.invoker
-./infra/deploy_gcp.sh run        # execute the job
-./infra/deploy_gcp.sh destroy
+./infra/deploy_aws.sh   deploy   # AgentCore Runtime + the federated role
+./infra/deploy_azure.sh deploy   # Container App
+./infra/deploy_azure.sh fic      # Entra app registration + FIC on Google's issuer
+./infra/deploy_azure.sh auth     # make the ingress demand it
+
+./infra/deploy_gcp.sh deploy     # ADK service + coordinator job + roles/run.invoker
+./infra/deploy_gcp.sh wire       # fold the AWS and Azure legs into the job
+./infra/deploy_gcp.sh run        # 3-cloud consensus, from the cloud
+./infra/deploy_gcp.sh matrix     # the 3x3, every client against every hosted server
+./infra/deploy_gcp.sh verify     # the negative controls
 ```
+
+The coordinator runs *as a Cloud Run job* rather than locally, and that is not
+a convenience: a user credential cannot mint an arbitrary-audience ID token at
+all, so there is no laptop equivalent of this path. Its host is what sets the
+whole auth bill — see [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md).
+
+`verify` is the part worth running twice. Every leg is probed alone, because
+the mesh degrades on purpose: a three-cloud run with one credential removed
+still reaches quorum on the other two and exits 0, which reads as "no denial"
+and is not.
 
 Tests are hermetic by default; the live suite skips itself unless the mesh is
 up.
 
 ```bash
-python3 -m pytest tests/ -q     # 92 passed, 11 skipped
+python3 -m pytest tests/ -q     # 60 passed, 11 skipped
 ```
 
 ## Status
@@ -216,23 +250,41 @@ Done and verified:
   behind a single `httpx.Auth`, attached to the client so the agent-card fetch
   is authenticated too. Peers default to unauthenticated, so the local matrix
   stays a protocol instrument.
-- **The GCP leg is deployed and authenticated** (`./infra/deploy_gcp.sh`): the
-  ADK agent as a Cloud Run service with `--no-allow-unauthenticated`, reached
-  by the coordinator running as a Cloud Run job with a workload OIDC token.
-  Proven in both directions — 643ms with the right audience, 401 on the card
-  fetch with the wrong one, 403 with no token. Deploying it immediately found
-  two defects a green test suite had not, and confirmed interop finding 2
-  against a real hosted card — where the client it breaks turns out to be
-  ADK's own.
+- **All three agents are deployed on their own vendor's hosting** — Cloud Run,
+  AgentCore Runtime, Container Apps — and answer one question together from a
+  Cloud Run coordinator: `3/3 clouds, agreed`, 1770ms warm, and consensus
+  latency ≈ max(legs) rather than their sum.
+- **All three legs are keyless, and that is now a measured claim rather than a
+  reported one.** Seven controls, 2026-08-07: each leg answers alone with its
+  credential, each is denied alone without it, and the unauthenticated `curl`
+  gets 403. Each probe isolates one leg, because the median absorbs a single
+  denial and exits 0 — the failure mode that would have let three decorative
+  auth modes look like three working ones. See
+  [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md#what-the-controls-actually-proved-2026-08-07).
+- **The 3×3 matrix run hosted: 8/9**, the one red cell being interop finding 2
+  — still ADK's own client against ADK's own server, now with two other clouds
+  beside it as controls.
+- Deploying found what a green suite had not, twice: two defects on the first
+  GCP leg (a 401 misfiled as a protocol failure, a totally failed run exiting
+  0), and on Azure a leg reporting `entra-fic` in front of a public ingress.
 
 Not done:
 
-- **Two of three agents are still local.** AWS (AgentCore) and Azure (Foundry)
-  are undeployed, so no measurement here crosses a cloud boundary — the one
-  deployed hop is coordinator and agent both in GCP, an in-cloud hop.
-- **Two of three auth legs have never seen a real provider.** The AWS STS and
-  Entra implementations are hermetically tested only; no token has been
-  exchanged with either. Treat them as code, not as results.
+- **Roughly 32 tests are gone.** The 2026-08-02 session left 92 passing; this
+  repo has 60, because that work was recovered from a Cloud Build tarball and
+  `.gcloudignore` excludes `tests/`. What they covered is unknown. The
+  surviving 71 (60 + 11 skipped) pass.
+- **The AWS role's scoping is unverified.** `deploy_aws.sh` writes a policy
+  scoped to the runtime ARN, and every AWS cell passes — which would answer
+  open question 2 against the predecessor finding — but the deployed policy has
+  not been read back, so it may have been widened to `"*"`. One command
+  settles it; until then the answer is unclaimed, not affirmative.
+- **Latencies are single cold runs.** Every service scales to zero, so the
+  hosted table mixes cold starts with warm calls and has no distribution behind
+  it. It orders nothing safely.
+- **The AWS STS and Entra paths are proven end to end, but only on the happy
+  path plus one denial each.** Token expiry, refresh and clock skew have never
+  been exercised against either provider.
 - `llm` mode is implemented but has been exercised for none of the three
   clouds; all measurements here are direct-brain.
 - No token or cost accounting, and no warm/cold latency distributions.

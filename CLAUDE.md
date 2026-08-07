@@ -9,8 +9,18 @@ series, the last build was code-complete with a passing suite for a day, and
 deploying it surfaced six defects — five of which no local test could have
 caught.
 
-The README's "Not done: **Nothing is deployed**" is the honest state. Keep it
-honest until it changes.
+All three clouds are now deployed and exercised together (2026-08-07). The rule
+did not stop applying when that became true — it changed shape. What the README
+must stay honest about now is the *gap between deployed and measured*: which
+legs have negative controls behind them, which numbers are single cold runs,
+and which claims still rest on a hermetic test rather than a provider response.
+
+There is a second lesson from this project's own history, and it cost more than
+any defect: **work that is deployed but not committed does not exist.** The AWS
+and Azure legs were built, deployed and run on 2026-08-02, and none of it was
+in git — it was recovered a week later out of a Cloud Build source tarball, and
+the tests written that day were gone for good, because `.gcloudignore` excludes
+`tests/` and `docs/`. Deploy, then document, then *commit*.
 
 ## Ground rule: no virtualenvs, latest everything
 
