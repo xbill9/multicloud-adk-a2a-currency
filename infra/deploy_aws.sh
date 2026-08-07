@@ -179,26 +179,37 @@ ensure_federated_role() {
 
   arn="$(runtime_arn)"
 
-  # Scoped to this runtime and its children. This is OPEN QUESTION 2: in
-  # adk-bedrock-a2a-currency, runtime/<id> and runtime/<id>/* were both denied
-  # 403 on the *agent-card fetch* while the invoke itself worked, and only
-  # Resource:"*" succeeded -- with data-plane denials absent from CloudTrail by
-  # default, so the denial was near-invisible.
+  # Scoped to this runtime and its children -- OPEN QUESTION 2, and it is now
+  # ANSWERED (2026-08-07, verified against the deployed policy).
   #
-  # Deploy scoped deliberately. If the card fetch 403s, `scope-test` widens it
-  # and the difference is the answer. Do not start at "*": shipping the broad
-  # policy first means never learning whether it was needed.
+  # The predecessor read was that the resource scope was too narrow: in
+  # adk-bedrock-a2a-currency, runtime/<id> and runtime/<id>/* were denied 403 on
+  # the *agent-card fetch* while the invoke worked, and only Resource:"*"
+  # succeeded. That diagnosis was wrong. The card fetch is a **separate IAM
+  # action** -- bedrock-agentcore:GetAgentCard -- and granting it against the
+  # same two narrow resources is what fixes it. Widening the resource "worked"
+  # because a wildcard resource on a wildcard-adjacent action set happens to
+  # cover the action nobody had named.
+  #
+  # So this mesh ships a scoped policy, and Resource:"*" is NOT required. If it
+  # ever were, that would have to be disclosed rather than glossed -- but it is
+  # not, and the reason the earlier project believed otherwise is that a missing
+  # *action* and a too-narrow *resource* produce the same 403, with data-plane
+  # denials absent from CloudTrail by default to make it near-invisible.
   aws iam put-role-policy --role-name "$ROLE_FEDERATED" \
     --policy-name invoke-currency-agent \
     --policy-document "{
       \"Version\": \"2012-10-17\",
       \"Statement\": [{
         \"Effect\": \"Allow\",
-        \"Action\": \"bedrock-agentcore:InvokeAgentRuntime\",
+        \"Action\": [
+          \"bedrock-agentcore:InvokeAgentRuntime\",
+          \"bedrock-agentcore:GetAgentCard\"
+        ],
         \"Resource\": [\"${arn}\", \"${arn}/*\"]
       }]
     }"
-  echo "granted InvokeAgentRuntime scoped to ${arn} and ${arn}/*"
+  echo "granted InvokeAgentRuntime + GetAgentCard scoped to ${arn} and ${arn}/*"
 }
 
 deploy() {
@@ -291,25 +302,30 @@ verify() {
   echo "principal that can mint the token this role's trust policy accepts."
 }
 
+# OPEN QUESTION 2, answered 2026-08-07. Kept as a verb because the answer is a
+# claim about a live policy, and a claim about a live policy should be
+# re-checkable rather than remembered.
 scope_test() {
-  echo "OPEN QUESTION 2: does InvokeAgentRuntime scoped to the runtime ARN"
-  echo "permit the agent-card fetch, or only Resource:\"*\"?"
+  echo "OPEN QUESTION 2: does a scoped policy permit the agent-card fetch, or"
+  echo "is Resource:\"*\" required?"
   echo
-  echo "The deployed policy is scoped. If the card fetch 403s while the invoke"
-  echo "succeeds, that reproduces the predecessor finding. Widen with:"
+  echo "ANSWERED: scoped works. Resource:\"*\" is NOT required. The predecessor"
+  echo "diagnosis -- too-narrow resource -- was wrong; the card fetch is a"
+  echo "separate ACTION, bedrock-agentcore:GetAgentCard, against the same two"
+  echo "narrow resources. A missing action and a too-narrow resource both"
+  echo "produce 403, which is why widening the resource looked like the fix."
   echo
-  echo "  aws iam put-role-policy --role-name ${ROLE_FEDERATED} \\"
-  echo "    --policy-name invoke-currency-agent --policy-document '{"
-  echo "      \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-  echo "      \"Action\":\"bedrock-agentcore:InvokeAgentRuntime\",\"Resource\":\"*\"}]}'"
+  echo "The deployed policy, live:"
+  aws iam get-role-policy --role-name "$ROLE_FEDERATED" \
+    --policy-name invoke-currency-agent \
+    --query 'PolicyDocument.Statement[0].{Action:Action,Resource:Resource}' \
+    --output json 2>/dev/null | sed 's/^/  /'
   echo
-  echo "Then re-run the master. If it passes only after widening, the answer is"
-  echo "yes and it must be DISCLOSED in the article, not glossed. If scoping"
-  echo "works, the predecessor finding was fixed or was environment-specific --"
-  echo "either way, say which."
+  echo "If Resource ever reads \"*\" here, this mesh is shipping a broad policy"
+  echo "and that must be disclosed, not glossed."
   echo
-  echo "Data-plane denials do not reach CloudTrail by default. Enable them"
-  echo "first or the 403 will be near-invisible."
+  echo "Note: data-plane denials do not reach CloudTrail by default, so a 403"
+  echo "from either cause is near-invisible until you enable them."
 }
 
 destroy() {

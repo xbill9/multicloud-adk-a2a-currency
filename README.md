@@ -267,6 +267,16 @@ Done and verified:
 - Deploying found what a green suite had not, twice: two defects on the first
   GCP leg (a 401 misfiled as a protocol failure, a totally failed run exiting
   0), and on Azure a leg reporting `entra-fic` in front of a public ingress.
+- **AgentCore is reached under least privilege**, closing the predecessor
+  series' longest-standing open question. Its finding — that only
+  `Resource: "*"` permitted the agent-card fetch — was a misdiagnosis: the card
+  fetch is a separate IAM action (`bedrock-agentcore:GetAgentCard`), not a
+  resource-scope problem. Confirmed by removing that one action and nothing
+  else, which breaks discovery while the invoke keeps working. **AWS had been
+  naming the missing action in the response body all along**; the earlier
+  adapter kept the status code and threw the body away. That is why
+  `coordinator/auth.py` logs the raw provider response at every auth boundary,
+  and it is the first time that decision has paid for itself.
 
 Not done:
 
@@ -274,11 +284,10 @@ Not done:
   repo has 60, because that work was recovered from a Cloud Build tarball and
   `.gcloudignore` excludes `tests/`. What they covered is unknown. The
   surviving 71 (60 + 11 skipped) pass.
-- **The AWS role's scoping is unverified.** `deploy_aws.sh` writes a policy
-  scoped to the runtime ARN, and every AWS cell passes — which would answer
-  open question 2 against the predecessor finding — but the deployed policy has
-  not been read back, so it may have been widened to `"*"`. One command
-  settles it; until then the answer is unclaimed, not affirmative.
+- **Nothing outstanding on AWS scoping** — this one moved to the done list:
+  the deployed policy is scoped to one runtime ARN, `Resource: "*"` is not
+  required, and the predecessor's contrary finding was a misdiagnosis. See
+  below.
 - **Latencies are single cold runs.** Every service scales to zero, so the
   hosted table mixes cold starts with warm calls and has no distribution behind
   it. It orders nothing safely.

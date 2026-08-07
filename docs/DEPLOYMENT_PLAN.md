@@ -208,25 +208,94 @@ caller-chosen, and Cloud Run has already been observed accepting a user token
 whose audience was gcloud's own OAuth client ID. What it does separate is "the
 token was rejected" from "no token was sent", which is worth having.
 
-Not proven by any of this: that the AWS role's trust policy is *scoped* the way
-`deploy_aws.sh` writes it. The role was deployed with `Resource` limited to the
-runtime ARN and `ARN/*`, and every AWS cell including the card fetch succeeds —
-which would answer open question 2 in the affirmative and contradict the
-predecessor finding. But the deployed policy has not been read back since, and
-until it is, the possibility that it was widened to `"*"` during the 2026-08-02
-session is open. `aws iam get-role-policy --role-name currency-aws-federated
---policy-name invoke-currency-agent` settles it in one command.
+## Open question 2, answered: it was never the resource scope
 
-## 4. Re-run the matrix hosted, and expect it to move
+The predecessor series left this open, and it was the reason to expect this
+repo would have to ship `Resource: "*"` and disclose it. It does not.
 
-Current cells are 7–864 ms because everything is local and `direct`-brain. The
-predecessor series measured 1.7–2.1 s to a Cloud Run container and 18.8–25.1 s
-to either hosted agent runtime. **That is not a regression** and the article
-must not read like one — the A2A leg tracks the remote's model and runtime, not
-the protocol.
+Read back off the live role, 2026-08-07:
 
-Consensus latency should land at ≈ max(legs), not the sum, provided the
-coordinator issues all three concurrently. Verify that rather than assume it.
+```json
+{ "Action": ["bedrock-agentcore:InvokeAgentRuntime",
+             "bedrock-agentcore:GetAgentCard"],
+  "Resource": ["arn:aws:bedrock-agentcore:us-west-2:…:runtime/currency_aws-9c5IMB2L1X",
+               "arn:aws:bedrock-agentcore:us-west-2:…:runtime/currency_aws-9c5IMB2L1X/*"] }
+```
+
+Scoped to one runtime, and all three client stacks reach it — agent-card fetch
+included. **The predecessor's diagnosis was wrong.** In
+`adk-bedrock-a2a-currency` the card fetch 403'd under a policy scoped to
+`runtime/<id>` and `runtime/<id>/*`, and widening `Resource` to `"*"` fixed it,
+so the resource scope took the blame. The actual cause is that **the card fetch
+is a separate IAM action**, `bedrock-agentcore:GetAgentCard`, which that policy
+never granted at any scope. Widening the resource worked by accident.
+
+Tested rather than inferred. Removing *only* `GetAgentCard`, leaving the two
+narrow resources untouched, and running the AWS leg alone:
+
+```
+aws failure: authentication: A2A endpoint returned 403 for
+  https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/…/.well-known/agent-card.json:
+  {"message":"User: arn:aws:sts::…:assumed-role/currency-aws-federated/currency-mesh-coordinator
+   is not authorized to perform: bedrock-agentcore:GetAgentCard on resource:
+   arn:aws:bedrock-agentcore:us-west-2:…:runtime/currency_aws-9c5IMB2L1X
+   because no identity-based policy allows the bedrock-agentcore:GetAgentCard action"}
+```
+
+Restoring the action restores the leg. So the resource scope was never
+implicated, and the invoke keeps working throughout — only discovery breaks.
+
+**And the answer was in the response the whole time.** AWS names the missing
+action, the resource, and the assumed-role principal, in one sentence. The
+predecessor series could not see it for a reason recorded in this repo's own
+`CLAUDE.md`: its adapter reported an HTTP status and discarded the provider
+body, and the surviving error string was paraphrased by a model into "an issue
+with the web identity token." An entirely diagnostic 403 arrived and was thrown
+away, and a year of "only `Resource: '*'` works" followed from what was left.
+
+That is the finding worth carrying forward — not the IAM trivia. **The cost was
+never the denial; it was the discarded body.** `coordinator/auth.py` logs the
+raw provider response at every auth boundary specifically so this cannot happen
+here, and this is the first time that decision has paid out.
+
+Two corollaries:
+
+- A missing action and a too-narrow resource both surface as 403, and
+  AgentCore's data-plane denials skip CloudTrail by default — so the audit
+  trail does not distinguish them either. The response body is the only place
+  the difference is written down.
+- **The fix that works is not evidence for the theory that motivated it.**
+  Widening `Resource` did resolve the predecessor's 403; it just did not
+  resolve it for the stated reason.
+
+Worth stating plainly because it changes a deliverable: this mesh reaches
+AgentCore under least privilege, and the earlier project's "only `Resource:
+'*'` worked" should be treated as retired rather than repeated.
+
+Two more things the same read-back settles:
+
+- **No IAM OIDC provider for `accounts.google.com` exists in the account** —
+  the trust policy's principal is `Federated: accounts.google.com` natively.
+  That is the rule from `CLAUDE.md` holding in practice: creating one here
+  would *break* federation, which is the exact opposite of the Entra side.
+- **The runtime's `authorizerConfiguration` is `null`**, which is what selects
+  SigV4. It is a tagged union whose only member is `customJWTAuthorizer`, so
+  an empty `{}` is rejected with an error that reads as though the field were
+  required when in fact it must be absent.
+
+## 4. Re-run the matrix hosted, and expect it to move — done
+
+Local cells are 7–922 ms because everything is loopback and `direct`-brain.
+Hosted, they are 360 ms–15.5 s, and **that is not a regression**: the A2A leg
+tracks the remote's model and runtime, not the protocol, and every service here
+scales to zero so the first call into each column pays a cold start. The
+predecessor's 1.7–2.1 s to a Cloud Run container is the right comparison for the
+warm cells; its 18.8–25.1 s figure is for hosted *model* runtimes and nothing
+here has a model in the path.
+
+Consensus latency does land at ≈ max(legs) rather than the sum — 1770 ms against
+a 1006 ms slowest leg — so the coordinator is issuing all three concurrently.
+Verified, not assumed.
 
 ## Keep the two axes separate
 
@@ -245,12 +314,13 @@ an evening debugging A2A that is not broken.
    secretless mesh is reachable from any host and the result generalizes. If
    no, "zero secrets" is a property of the Cloud-Run-hosted topology
    specifically, and the article must scope the claim that way. Unresolved.
-2. **What ARN shape does AgentCore authorise `InvokeAgentRuntime` against?**
-   Scoping to `runtime/<id>` and `runtime/<id>/*` was denied 403 on the
-   agent-card fetch in `adk-bedrock-a2a-currency`; only `Resource: "*"` worked,
-   and data-plane denials do not reach CloudTrail by default. Any deployment
-   here that touches AgentCore inherits this as unfinished business — and
-   shipping `Resource: "*"` must be disclosed, not glossed.
+2. ~~**What ARN shape does AgentCore authorise `InvokeAgentRuntime` against?**~~
+   **Answered, 2026-08-07 — the question was aimed at the wrong field.**
+   `runtime/<id>` and `runtime/<id>/*` are sufficient; `Resource: "*"` is not
+   required and this mesh does not ship it. The predecessor's card-fetch 403
+   was a missing *action*, `bedrock-agentcore:GetAgentCard`, not a too-narrow
+   *resource*. See "Open question 2, answered" above. The inherited unfinished
+   business is closed, and `deploy_aws.sh` now grants both actions.
 3. ~~**Does Entra FIC match Google tokens on `sub` or `azp`?**~~ **Answered,
    2026-08-02.** `sub`, and it means what it says. The FIC's `subject` is the
    coordinator SA's numeric unique ID (`101913873674028276612`) and the
