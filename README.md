@@ -252,8 +252,10 @@ Done and verified:
   stays a protocol instrument.
 - **All three agents are deployed on their own vendor's hosting** — Cloud Run,
   AgentCore Runtime, Container Apps — and answer one question together from a
-  Cloud Run coordinator: `3/3 clouds, agreed`, 1770ms warm, and consensus
-  latency ≈ max(legs) rather than their sum.
+  Cloud Run coordinator: `3/3 clouds, agreed`, 2258–2511ms across three warm
+  runs, and consensus latency at **max(legs) + ~1s** — emphatically not their
+  sum, so the legs are concurrent, but not bare max(legs) either: the ~1s is
+  the coordinator's own fixed cost, which no per-leg figure includes.
 - **All three legs are keyless, and that is now a measured claim rather than a
   reported one.** Seven controls, 2026-08-07: each leg answers alone with its
   credential, each is denied alone without it, and the unauthenticated `curl`
@@ -288,12 +290,16 @@ Not done:
   the deployed policy is scoped to one runtime ARN, `Resource: "*"` is not
   required, and the predecessor's contrary finding was a misdiagnosis. See
   below.
-- **Latencies are single cold runs.** Every service scales to zero, so the
-  hosted table mixes cold starts with warm calls and has no distribution behind
-  it. It orders nothing safely.
+- **Most hosted latencies are single runs**, and every service scales to zero,
+  so a table can mix cold starts with warm calls unless it says which it is.
+  The consensus run is the one exception — three consecutive warm runs, which
+  is what made the `max(legs) + ~1s` floor visible and the bare `max(legs)`
+  claim untenable. The matrix cells have no distribution behind them and order
+  nothing safely.
 - **The AWS STS and Entra paths are proven end to end, but only on the happy
   path plus one denial each.** Token expiry, refresh and clock skew have never
   been exercised against either provider.
 - `llm` mode is implemented but has been exercised for none of the three
   clouds; all measurements here are direct-brain.
-- No token or cost accounting, and no warm/cold latency distributions.
+- No token or cost accounting. Warm/cold is now labelled everywhere it is
+  recorded, but only the consensus run has more than one sample behind it.

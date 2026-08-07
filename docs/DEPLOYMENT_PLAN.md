@@ -326,9 +326,11 @@ predecessor's 1.7–2.1 s to a Cloud Run container is the right comparison for t
 warm cells; its 18.8–25.1 s figure is for hosted *model* runtimes and nothing
 here has a model in the path.
 
-Consensus latency does land at ≈ max(legs) rather than the sum — 1770 ms against
-a 1006 ms slowest leg — so the coordinator is issuing all three concurrently.
-Verified, not assumed.
+Consensus latency is emphatically not the sum, so the coordinator is issuing all
+three concurrently — verified, not assumed. But it is not ≈ max(legs) either:
+there is a ~1s coordinator floor above the slowest leg. The figure to quote is
+**elapsed ≈ max(legs) + ~1s fixed**; see the warm table above for the three runs
+it rests on.
 
 ## Keep the two axes separate
 

@@ -137,7 +137,10 @@ Relevant measured results:
   agent runtime. Expect the same shape here once agents are hosted — the
   current single-digit-millisecond matrix numbers are local, direct-brain.
 - Verified/consensus latency ≈ max(legs), not the sum, when calls are issued
-  concurrently.
+  concurrently. Measured here 2026-08-07 and the ≈ needs a term: elapsed is
+  `max(legs) + ~1s` of coordinator fixed cost (container start, card fetches,
+  credential mints), which no per-leg figure includes. Not the sum — but
+  quoting max(legs) alone was wrong by 85% on the fastest of three warm runs.
 - Open question nobody has answered: on ADK → AgentCore, scoping
   `bedrock-agentcore:InvokeAgentRuntime` to `runtime/<id>` and `runtime/<id>/*`
   was denied 403 on the agent-card fetch; only `Resource: "*"` worked. If this
