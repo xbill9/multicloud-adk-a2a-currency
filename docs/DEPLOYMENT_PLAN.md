@@ -163,12 +163,24 @@ warm shape, from 2026-08-03: `gcp 1006ms, aws 902ms, azure 476ms, elapsed
 concurrently rather than assuming it. Cold, the same relation holds: 25012
 against 24127.
 
-The Azure leg is cold on *every* run an hour apart — 24127ms, then 21848ms —
-because the deployed Container App sits at `minReplicas: 0` while
-`deploy_azure.sh` writes `--min-replicas 1`. That drift is the whole
-explanation for the slowest column in both tables, and it is configuration, not
-Container Apps being twenty seconds slower than the other two clouds. Either
-fix the deployed app or stop quoting cold Azure numbers; do not do neither.
+The Azure leg was cold on *every* run an hour apart — 24127ms, 21848ms,
+26847ms — because the deployed Container App sat at `minReplicas: 0` while
+`deploy_azure.sh` wrote `--min-replicas 1`. That drift is the whole explanation
+for the slowest column in both tables. It is configuration, not Container Apps
+being twenty seconds slower than the other two clouds, and a reader comparing
+the three columns would have concluded otherwise.
+
+**Scale-to-zero is the intended steady state** for all three clouds — this is a
+demonstrator, not a service, and paying for idle replicas to make a latency
+table look tidier is paying to mislead. So the fix is not to pin a replica; it
+is to stop the scripts and the cloud from disagreeing about which state they
+are in. `MIN_REPLICAS` now defaults to `0`, matching intent, and
+`./infra/deploy_azure.sh scale <n>` moves between the two without a rebuild —
+because the reason the last drift survived is that nobody was going to redeploy
+an app to change one integer back.
+
+Any warm number recorded here must say so. Cold and warm figures in one column
+is the same error as the drift, one layer up.
 
 The deployed 3×3 matrix is in [`INTEROP.md`](INTEROP.md#the-same-matrix-deployed-2026-08-07):
 **8/9**, the single red cell being finding 2, still ADK's own client against

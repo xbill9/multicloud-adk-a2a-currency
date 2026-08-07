@@ -6,6 +6,8 @@
 #   ./infra/deploy_azure.sh deploy     # RG, ACR, env, container app
 #   ./infra/deploy_azure.sh fic        # Entra app registration + FIC
 #   ./infra/deploy_azure.sh auth       # enforce Entra in front of the ingress
+#   ./infra/deploy_azure.sh scale 1    # warm it for a measurement run
+#   ./infra/deploy_azure.sh scale 0    # back to scale-to-zero, the steady state
 #   ./infra/deploy_azure.sh env        # env vars to add to the GCP master
 #   ./infra/deploy_azure.sh verify     # negative controls -- run these
 #   ./infra/deploy_azure.sh url
@@ -35,6 +37,18 @@ APP="${APP:-currency-azure}"
 APP_REG="${APP_REG:-currency-mesh-master}"
 IMAGE_TAG="${IMAGE_TAG:-azure-agent}"
 DOCKER="${DOCKER:-docker}"
+
+# Scale-to-zero is the steady state for this mesh: it is a demonstrator, not a
+# service, and paying for an idle replica on three clouds to make a latency
+# table look tidier would be paying to mislead. The cost is a ~20s cold start
+# on every call, which is the single largest number in every deployed table
+# here and is configuration rather than Container Apps being slow.
+#
+# This was hard-coded to 1 while the deployed app sat at 0, so the scripts
+# disagreed with the cloud and the cold starts read as a property of Azure.
+# Set MIN_REPLICAS=1 to warm it for a measurement run; `$0 scale 0` to undo.
+MIN_REPLICAS="${MIN_REPLICAS:-0}"
+MAX_REPLICAS="${MAX_REPLICAS:-2}"
 
 GCP_PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 MASTER_SA="${COORDINATOR_SA:-currency-coordinator@${GCP_PROJECT}.iam.gserviceaccount.com}"
@@ -94,7 +108,7 @@ deploy() {
       --registry-server "${ACR}.azurecr.io" \
       --registry-username "$ACR" --registry-password "$pw" \
       --target-port 8080 --ingress external \
-      --min-replicas 1 --max-replicas 2 \
+      --min-replicas "$MIN_REPLICAS" --max-replicas "$MAX_REPLICAS" \
       --env-vars CURRENCY_MODEL_MODE=direct HOST=0.0.0.0 PORT=8080 -o none
   fi
 
@@ -180,6 +194,29 @@ auth_enforce() {
   echo "audience: ${app_id}"
 }
 
+# Warm the leg for a measurement run, or put it back. Separate from `deploy` so
+# that returning to scale-to-zero costs one command and does not go through a
+# rebuild -- the reason the last drift survived is that nobody was going to
+# redeploy an app just to change one integer back.
+scale() {
+  local n="${1:?usage: $0 scale <min-replicas>}"
+  az containerapp update -n "$APP" -g "$RG" \
+    --min-replicas "$n" --max-replicas "$MAX_REPLICAS" -o none
+  az containerapp show -n "$APP" -g "$RG" \
+    --query '{min:properties.template.scale.minReplicas,
+              max:properties.template.scale.maxReplicas,
+              revision:properties.latestRevisionName}' -o json
+  [[ "$n" -gt 0 ]] && cat <<'EOF'
+
+Warm. This is a MEASUREMENT state, not the steady state -- it bills for an idle
+replica. Latencies recorded now are warm-path numbers and must be labelled as
+such; do not mix them into a table alongside cold ones. Put it back with:
+
+  ./infra/deploy_azure.sh scale 0
+EOF
+  return 0
+}
+
 env_block() {
   local app_id
   app_id="$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv)"
@@ -245,9 +282,10 @@ case "${1:-deploy}" in
   deploy) deploy ;;
   fic) fic ;;
   auth) auth_enforce ;;
+  scale) shift; scale "${1:-0}" ;;
   env) env_block ;;
   verify) verify ;;
   url) app_url ;;
   destroy) destroy ;;
-  *) echo "usage: $0 {deploy|fic|auth|env|verify|url|destroy}" >&2; exit 2 ;;
+  *) echo "usage: $0 {deploy|fic|auth|scale <n>|env|verify|url|destroy}" >&2; exit 2 ;;
 esac
