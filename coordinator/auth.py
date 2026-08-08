@@ -452,6 +452,26 @@ class _AwsCredentials:
         return datetime.now(UTC) + _EXPIRY_SKEW < self.expires_at
 
 
+def _parse_expiry(value: str, boundary: str) -> datetime:
+    """Read a provider's expiry timestamp as an aware UTC datetime.
+
+    Two traps, both of which surface far from here if left alone. A value with
+    no offset parses happily and then raises ``TypeError: can't compare
+    offset-naive and offset-aware datetimes`` on the *next* call, inside
+    ``usable`` -- a crash at a line that has nothing to do with the cause. And
+    an unparseable value raises ``ValueError``, which is not an ``AdapterError``
+    and so travels back as an unmapped exception rather than a named auth
+    failure. Both providers document UTC, so a naive value is assumed UTC.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise _auth_error(
+            boundary, f"could not read the credential expiry {value!r}: {exc}"
+        ) from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _parse_sts_response(body: str, boundary: str) -> _AwsCredentials:
     try:
         root = ElementTree.fromstring(body)
@@ -472,7 +492,7 @@ def _parse_sts_response(body: str, boundary: str) -> _AwsCredentials:
         access_key_id=field("AccessKeyId"),
         secret_access_key=field("SecretAccessKey"),
         session_token=field("SessionToken"),
-        expires_at=datetime.fromisoformat(field("Expiration")),
+        expires_at=_parse_expiry(field("Expiration"), boundary),
     )
 
 

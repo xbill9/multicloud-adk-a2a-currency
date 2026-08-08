@@ -80,7 +80,7 @@ deploy() {
     --image "$IMAGE" \
     --region "$REGION" --project "$PROJECT" \
     --service-account "$COORDINATOR_SA" \
-    --set-env-vars "GCP_A2A_ENDPOINT=${url},GCP_A2A_AUTH=google-id-token" \
+    --set-env-vars "GCP_A2A_ENDPOINT=${url},GCP_A2A_AUTH=google-id-token,CURRENCY_COORDINATOR_CLOUD=gcp" \
     --command python \
     --args="-m,coordinator.cli,100,USD,EUR,JPY,--cloud,gcp" \
     --max-retries 0 --task-timeout 300s \
@@ -94,6 +94,10 @@ deploy() {
 peer_env() {
   echo "GCP_A2A_ENDPOINT=$(service_url)"
   echo "GCP_A2A_AUTH=google-id-token"
+  # Both jobs run on Cloud Run, so the gcp leg never leaves Google Cloud. The
+  # matrix marks that column rather than counting it toward the interop claim;
+  # unset (the local mesh) means the distinction does not arise.
+  echo "CURRENCY_COORDINATOR_CLOUD=gcp"
   local script
   for script in deploy_aws deploy_azure; do
     if ! "$REPO/infra/${script}.sh" env 2>/dev/null | grep -E '^[A-Z][A-Z0-9_]*=' ; then

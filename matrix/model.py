@@ -14,6 +14,11 @@ class Cell(BaseModel):
     server_stack: str
     #: Auth mode used to reach this server; "none" against the local mesh.
     auth: str = "none"
+    #: Whether this call left the coordinator's own cloud. "local" is the
+    #: loopback mesh, where the question does not arise; "in-cloud" is a hop
+    #: that never crossed a vendor boundary and must not be counted toward the
+    #: interop claim the way a "cross-cloud" cell can.
+    hop: str = "local"
     ok: bool
     #: FailureKind value, or "sdk-missing" when the client SDK is not installed.
     failure_kind: str | None = None
@@ -62,3 +67,12 @@ class MatrixReport(BaseModel):
     def attempted(self) -> list[Cell]:
         """Cells that actually ran, i.e. excluding uninstalled client SDKs."""
         return [cell for cell in self.cells if cell.failure_kind != "sdk-missing"]
+
+    @property
+    def in_cloud_servers(self) -> list[str]:
+        """Servers sharing the coordinator's cloud, so reaching them crosses nothing."""
+        seen: list[str] = []
+        for cell in self.cells:
+            if cell.hop == "in-cloud" and cell.server not in seen:
+                seen.append(cell.server)
+        return seen

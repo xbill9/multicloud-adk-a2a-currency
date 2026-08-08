@@ -245,7 +245,12 @@ run where every participant 401'd reported green.
   disagree.
 - **The GCP column is an in-cloud hop.** Coordinator and agent are both in
   `us-central1`, so that column measures Cloud Run to Cloud Run and must not be
-  counted toward the interop claim the way the AWS and Azure columns can.
+  counted toward the interop claim the way the AWS and Azure columns can. This
+  is no longer left to the reader: `matrix/runner.py` classifies every cell as
+  `local`, `in-cloud` or `cross-cloud` from `CURRENCY_COORDINATOR_CLOUD`, marks
+  the column `gcp*`, and prints the cross-cloud count on its own line. A hosted
+  9/9 is six cells of interop and three of Cloud Run talking to itself. The
+  marker is exercised locally only so far — the jobs have not been re-run since.
 - **The deployed latencies are single executions**, cold or warm depending only
   on where in the run order a cell fell. There is no distribution behind any of
   them, and they should not be read as a comparison between clouds.

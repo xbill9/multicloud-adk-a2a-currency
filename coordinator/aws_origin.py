@@ -43,6 +43,7 @@ from coordinator.auth import (
     _CachedToken,
     _entra_detail,
     _log_provider_response,
+    _parse_expiry,
     _sign_request,
 )
 from coordinator.errors import AdapterError, FailureKind
@@ -160,7 +161,7 @@ class AwsWorkloadCredentials:
                 access_key_id=payload["AccessKeyId"],
                 secret_access_key=payload["SecretAccessKey"],
                 session_token=payload["Token"],
-                expires_at=datetime.fromisoformat(payload["Expiration"]),
+                expires_at=_parse_expiry(payload["Expiration"], boundary),
             )
         except KeyError as exc:
             raise _auth_error(

@@ -20,6 +20,11 @@ from coordinator.auth import (
     EntraFederatedAuth,
     GoogleIdTokenAuth,
     WorkloadIdentity,
+    _AwsCredentials,
+    _CachedToken,
+    _EXPIRY_SKEW,
+    _jwt_expiry,
+    _parse_sts_response,
     _signing_key,
     auth_mode,
     credentials_for,
@@ -156,6 +161,17 @@ STS_OK = """<AssumeRoleWithWebIdentityResponse
     </Credentials>
   </AssumeRoleWithWebIdentityResult>
 </AssumeRoleWithWebIdentityResponse>"""
+
+
+def sts_expiring_in(seconds: int) -> str:
+    """STS_OK with a live expiry, so the refresh branch can be reached at all.
+
+    STS_OK itself expires in 2099, which exercises only the cache hit.
+    """
+    when = datetime.now(UTC) + timedelta(seconds=seconds)
+    return STS_OK.replace(
+        "2099-01-01T00:00:00Z", when.isoformat().replace("+00:00", "Z")
+    )
 
 
 def sts_error(code: str, message: str = "denied") -> str:
@@ -393,6 +409,163 @@ def test_entra_registry_builds_a_configured_credential(monkeypatch):
 
     assert auth.mode == "entra-fic"
     assert auth._scope == "client-uuid/.default"
+
+
+# --------------------------------------------------------------------------
+# Token lifecycle: expiry, refresh and skew
+#
+# Every deployed run so far has been a Cloud Run job that lives a few seconds,
+# so none of the refresh branches below has ever executed against a provider.
+# They are reachable here because expiry is a clock question, not a network one.
+# --------------------------------------------------------------------------
+
+
+def test_the_skew_window_is_what_makes_a_live_token_unusable():
+    """Inside the skew a token is still valid but must not be handed out.
+
+    This is the whole reason the seam refreshes early: a token that expires
+    mid-flight fails at the provider, where the error is someone else's.
+    """
+    inside = _CachedToken("t", datetime.now(UTC) + _EXPIRY_SKEW - timedelta(seconds=5))
+    outside = _CachedToken("t", datetime.now(UTC) + _EXPIRY_SKEW + timedelta(seconds=5))
+
+    assert inside.usable is False
+    assert outside.usable is True
+
+
+def test_an_already_expired_credential_is_not_usable():
+    """Clock skew the wrong way: the provider's expiry is already behind us."""
+    past = _AwsCredentials("k", "s", "t", datetime.now(UTC) - timedelta(minutes=10))
+    assert past.usable is False
+
+
+def test_aws_and_google_agree_on_the_skew():
+    """Two usable properties, one policy -- they must not drift apart."""
+    expires_at = datetime.now(UTC) + _EXPIRY_SKEW - timedelta(seconds=1)
+    assert _CachedToken("t", expires_at).usable is False
+    assert _AwsCredentials("k", "s", "t", expires_at).usable is False
+
+
+async def test_expiring_sts_credentials_are_re_exchanged():
+    """The counterpart to test_credentials_are_cached_across_calls.
+
+    That test proves the cache hit and nothing else, because STS_OK expires in
+    2099. Without this one the AWS refresh branch is never executed anywhere.
+    """
+    seen: list[httpx.Request] = []
+    auth = sigv4_auth(sts_body=sts_expiring_in(30), record=seen)
+    url = "https://bedrock-agentcore.us-west-2.amazonaws.com/runtime/abc"
+
+    for _ in range(3):
+        async for _signed in auth.async_auth_flow(httpx.Request("POST", url, json={})):
+            pass
+
+    assert len(seen) == 3
+
+
+async def test_sts_credentials_expired_on_arrival_are_not_served_once():
+    """A provider clock ahead of ours must never yield a usable credential."""
+    seen: list[httpx.Request] = []
+    auth = sigv4_auth(sts_body=sts_expiring_in(-60), record=seen)
+    url = "https://bedrock-agentcore.us-west-2.amazonaws.com/runtime/abc"
+
+    for _ in range(2):
+        async for _signed in auth.async_auth_flow(httpx.Request("POST", url, json={})):
+            pass
+
+    assert len(seen) == 2
+
+
+async def test_entra_access_token_is_cached_until_it_nears_expiry():
+    seen: list[httpx.Request] = []
+    auth = entra_auth({"access_token": "entra-token", "expires_in": 3600}, record=seen)
+
+    for _ in range(3):
+        async for _ in auth.async_auth_flow(httpx.Request("POST", "https://foundry.example/a2a")):
+            pass
+
+    exchanges = [r for r in seen if "login.microsoftonline.com" in str(r.url)]
+    assert len(exchanges) == 1
+
+
+async def test_short_lived_entra_token_is_re_exchanged():
+    """expires_in is parsed; nothing until now asserted that it is obeyed."""
+    seen: list[httpx.Request] = []
+    auth = entra_auth({"access_token": "entra-token", "expires_in": 30}, record=seen)
+
+    for _ in range(3):
+        async for _ in auth.async_auth_flow(httpx.Request("POST", "https://foundry.example/a2a")):
+            pass
+
+    exchanges = [r for r in seen if "login.microsoftonline.com" in str(r.url)]
+    assert len(exchanges) == 3
+
+
+async def test_entra_response_without_expires_in_is_treated_as_an_hour():
+    """The documented default. If it were read as 0 every call would re-exchange."""
+    seen: list[httpx.Request] = []
+    auth = entra_auth({"access_token": "entra-token"}, record=seen)
+
+    for _ in range(2):
+        async for _ in auth.async_auth_flow(httpx.Request("POST", "https://foundry.example/a2a")):
+            pass
+
+    exchanges = [r for r in seen if "login.microsoftonline.com" in str(r.url)]
+    assert len(exchanges) == 1
+
+
+def test_jwt_expiry_reads_the_exp_claim():
+    expected = datetime.now(UTC) + timedelta(seconds=3600)
+    actual = _jwt_expiry(jwt(expires_in_seconds=3600))
+    assert abs((actual - expected).total_seconds()) < 2
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "not-a-jwt", "header.!!!not-base64!!!.sig", "header..sig"]
+)
+def test_an_unreadable_token_refreshes_sooner_rather_than_raising(bad, caplog):
+    """A mint we cannot parse is still a mint; failing here would break the leg."""
+    with caplog.at_level(logging.WARNING):
+        expiry = _jwt_expiry(bad)
+
+    assert expiry > datetime.now(UTC)
+    assert expiry < datetime.now(UTC) + timedelta(minutes=6)
+    assert "could not read exp" in caplog.text
+
+
+async def test_a_token_without_an_exp_claim_is_not_cached_forever():
+    """Google always sends exp; a token that lacked it must not cache unbounded."""
+    seen: list[httpx.Request] = []
+    no_exp = base64.urlsafe_b64encode(json.dumps({"aud": "x"}).encode()).rstrip(b"=").decode()
+    identity = identity_returning(f"header.{no_exp}.sig", record=seen)
+
+    await identity.id_token("aud")
+    cached = identity._cache["aud"]
+
+    assert cached.expires_at < datetime.now(UTC) + timedelta(minutes=6)
+
+
+def test_a_naive_expiry_does_not_defer_a_typeerror_into_the_next_call():
+    """AWS sends a Z suffix. If it ever did not, the crash landed in `usable`.
+
+    `fromisoformat` accepts a value with no offset, so parsing succeeded and
+    the naive/aware comparison blew up one call later, at a line with nothing
+    to do with the cause. Both providers document UTC, so assume it.
+    """
+    credentials = _parse_sts_response(
+        STS_OK.replace("2099-01-01T00:00:00Z", "2099-01-01T00:00:00"), "test"
+    )
+
+    assert credentials.expires_at.tzinfo is not None
+    assert credentials.usable is True
+
+
+def test_an_unparseable_expiry_is_a_named_auth_failure_not_a_valueerror():
+    """ValueError is not an AdapterError, so it travelled back unmapped."""
+    with pytest.raises(AdapterError) as exc:
+        _parse_sts_response(STS_OK.replace("2099-01-01T00:00:00Z", "whenever"), "test")
+
+    assert "whenever" in str(exc.value)
 
 
 def test_a_misconfigured_peer_fails_its_cell_not_the_matrix(monkeypatch):

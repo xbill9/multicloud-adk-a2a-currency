@@ -40,6 +40,25 @@ DEFAULT_SERVERS = (
     Server("azure", "Azure", "agent-framework A2AExecutor", os.getenv("AZURE_A2A_ENDPOINT", "http://127.0.0.1:10003")),
 )
 
+#: Set on the deployed jobs to the cloud the coordinator itself runs in. A cell
+#: whose server matches never leaves that cloud, and a 3x3 that silently counts
+#: such a cell toward the interop claim is inflating it -- the coordinator runs
+#: on Cloud Run, so the gcp column is Cloud Run reaching Cloud Run. Unset for
+#: the local mesh, where every endpoint is loopback and the question is moot.
+COORDINATOR_CLOUD_ENV = "CURRENCY_COORDINATOR_CLOUD"
+
+
+def coordinator_cloud() -> str | None:
+    """Which cloud the matrix is being run *from*, or None when run locally."""
+    return os.getenv(COORDINATOR_CLOUD_ENV, "").strip().lower() or None
+
+
+def hop_kind(server: Server, from_cloud: str | None) -> str:
+    """Classify one leg as local, in-cloud, or genuinely cross-cloud."""
+    if from_cloud is None:
+        return "local"
+    return "in-cloud" if server.name.lower() == from_cloud else "cross-cloud"
+
 
 async def probe(
     stack: str,
@@ -47,6 +66,7 @@ async def probe(
     request: ConversionRequest,
     *,
     timeout_s: float,
+    hop: str = "local",
 ) -> Cell:
     """Run one directed A2A call and classify whatever comes back."""
     try:
@@ -59,6 +79,7 @@ async def probe(
             server=server.name,
             server_cloud=server.cloud,
             server_stack=server.stack,
+            hop=hop,
             ok=False,
             failure_kind=exc.kind.value,
             detail=str(exc)[:300],
@@ -70,6 +91,7 @@ async def probe(
         server_cloud=server.cloud,
         server_stack=server.stack,
         auth=auth_mode(auth),
+        hop=hop,
     )
     try:
         client = load_client(stack, server.endpoint, timeout_s=timeout_s, auth=auth)
@@ -110,10 +132,19 @@ async def run_matrix(
     three SDKs hammering one uvicorn worker concurrently would measure
     contention instead of protocol overhead.
     """
+    from_cloud = coordinator_cloud()
     cells: list[Cell] = []
     for stack in stacks:
         for server in servers:
-            cells.append(await probe(stack, server, request, timeout_s=timeout_s))
+            cells.append(
+                await probe(
+                    stack,
+                    server,
+                    request,
+                    timeout_s=timeout_s,
+                    hop=hop_kind(server, from_cloud),
+                )
+            )
     return MatrixReport(
         request_summary=(
             f"{request.amount} {request.source_currency} -> "
@@ -126,15 +157,17 @@ async def run_matrix(
 
 def render_table(report: MatrixReport) -> str:
     servers = report.servers
+    in_cloud = set(report.in_cloud_servers)
     width = max([len(stack) for stack in report.client_stacks] + [14])
-    columns = [max(len(server), 16) for server in servers]
+    headers = [f"{server}*" if server in in_cloud else server for server in servers]
+    columns = [max(len(header), 16) for header in headers]
 
     lines = [
         f"A2A interop matrix  ({report.request_summary}, brain={report.model_mode})",
         "",
         "client \\ server".ljust(width)
         + "  "
-        + "  ".join(server.ljust(col) for server, col in zip(servers, columns)),
+        + "  ".join(header.ljust(col) for header, col in zip(headers, columns)),
         "-" * (width + 2 + sum(col + 2 for col in columns)),
     ]
     for stack in report.client_stacks:
@@ -153,6 +186,21 @@ def render_table(report: MatrixReport) -> str:
     attempted = report.attempted
     passed = [cell for cell in attempted if cell.ok]
     lines += ["", f"{len(passed)}/{len(attempted)} attempted cells succeeded"]
+
+    # The interop claim rests on the cells that actually crossed a vendor
+    # boundary, so say how many did. Without this the gcp column pads the
+    # score with Cloud Run reaching Cloud Run.
+    if in_cloud:
+        crossed = [cell for cell in passed if cell.hop == "cross-cloud"]
+        inside = [cell for cell in passed if cell.hop == "in-cloud"]
+        lines.append(
+            f"  of which {len(crossed)} crossed a cloud boundary and "
+            f"{len(inside)} did not"
+        )
+        lines.append(
+            "* in-cloud hop: " + ", ".join(sorted(in_cloud)) + " shares the "
+            "coordinator's cloud, so these cells do not support the interop claim"
+        )
 
     # Only shown once something is deployed; against the local mesh every leg
     # is "none" and the table reads as it always did.

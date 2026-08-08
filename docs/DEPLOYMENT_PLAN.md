@@ -129,7 +129,11 @@ never authorization.** The binding is what authorizes.
 for the identical code locally. The predecessor series predicted 1.7–2.1s to a
 Cloud Run container; this is well inside that. Note this is an **in-cloud hop**
 — both ends are GCP — so it belongs in the matrix labelled as such and must not
-pad the interop claim.
+pad the interop claim. The runner now does it: `CURRENCY_COORDINATOR_CLOUD=gcp`
+is set on both jobs by `deploy_gcp.sh`, and the marker counts the cross-cloud
+cells separately rather than reporting a bare 9/9. Verified against the local
+mesh with the variable set; **the jobs have not been redeployed or re-run since
+the change**, so no hosted table has yet been printed with the marker on it.
 
 **Two defects, neither catchable locally**, both found within minutes of the
 first authenticated call by code with a green 69-test suite: a 401 misfiled as

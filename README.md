@@ -16,8 +16,13 @@ container's bind address and `RemoteA2aAgent` believes it. Both halves pass
 Google's tests, because locally those two addresses are the same.
 
 Everything crossing a cloud boundary here is authenticated with **no stored
-secret**, and each of those three legs has a negative control behind it rather
+secret**, and each of the three legs has a negative control behind it rather
 than a self-reported mode.
+
+One caveat the numbers below carry throughout: the coordinator runs on Cloud
+Run, so **the GCP leg is an in-cloud hop, not a cross-cloud one**. Two of the
+three legs cross a vendor boundary; the third is Cloud Run reaching Cloud Run,
+and the matrix now marks it rather than letting it pad the score.
 
 See [`docs/INTEROP.md`](docs/INTEROP.md) and
 [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md).
@@ -67,6 +72,32 @@ Latencies are loopback, direct-brain, single runs on one machine — they order
 the stacks and nothing more. An earlier revision of this table recorded
 69/31/864ms for the `gcp` column on different hardware and an older ADK.
 
+When `CURRENCY_COORDINATOR_CLOUD` is set, the same table marks the column that
+never left that cloud and reports the interop score separately from the raw
+one:
+
+```console
+$ CURRENCY_COORDINATOR_CLOUD=gcp python3 -m matrix.runner --client a2a-sdk
+
+client \ server  gcp*              aws               azure
+----------------------------------------------------------------------
+a2a-sdk         ok 153ms          ok 7ms            ok 8ms
+
+3/3 attempted cells succeeded
+  of which 2 crossed a cloud boundary and 1 did not
+* in-cloud hop: gcp shares the coordinator's cloud, so these cells do not
+  support the interop claim
+```
+
+`deploy_gcp.sh` sets that variable to `gcp` on both jobs, so a hosted run marks
+the column. Unset — the local mesh — every leg is loopback, the distinction
+does not arise, and the table reads exactly as it always did.
+
+**Not yet observed hosted.** The mechanism above is exercised against the local
+mesh, which is where the transcript came from; the deployed jobs have not been
+re-run since the change. Under this repo's deploy-then-document rule that makes
+it a code fact, not a result.
+
 Three client SDKs × three natively-served agents. Every cell is one real A2A
 call; a failed cell records which layer broke (`transport`, `protocol`,
 `timeout`, `authentication`, `provider`) rather than just failing — the
@@ -105,6 +136,7 @@ degrade the quorum instead of failing the run.
         +---------------+---------------+
         | A2A v1.0      | A2A v1.0      | A2A v1.0
         | ID token      | SigV4         | Entra token
+        | IN-CLOUD HOP  | cross-cloud   | cross-cloud
         v               v               v
   Google Cloud      AWS              Azure
   ADK LlmAgent      Strands Agent    Agent Framework Agent
@@ -230,7 +262,7 @@ Tests are hermetic by default; the live suite skips itself unless the mesh is
 up.
 
 ```bash
-python3 -m pytest tests/ -q     # 60 passed, 11 skipped
+python3 -m pytest tests/ -q     # 85 passed, 11 skipped
 ```
 
 ## Status
@@ -243,13 +275,22 @@ Done and verified:
 - Three client stacks behind one interface, sharing one parser.
 - The full 3×3 matrix passing locally, with two real interop defects found,
   diagnosed, and documented.
-- 71 tests, including all nine cells as assertions and a
+- 96 tests, including all nine cells as assertions and a
   cloud-goes-offline degradation case.
 - One credential seam for all three legs (`coordinator/auth.py`): Google ID
   token, STS `AssumeRoleWithWebIdentity` → SigV4, and Entra federated exchange
   behind a single `httpx.Auth`, attached to the client so the agent-card fetch
   is authenticated too. Peers default to unauthenticated, so the local matrix
   stays a protocol instrument.
+- **The token-refresh branches are covered, and covering them found a latent
+  crash.** A provider expiry with no UTC offset parsed cleanly and then raised
+  `TypeError: can't compare offset-naive and offset-aware datetimes` on the
+  *next* call, inside `usable` — a crash at a line with nothing to do with the
+  cause. An unparseable one raised `ValueError`, which is not an `AdapterError`
+  and so travelled back unmapped rather than as a named auth failure. Both are
+  now one `_parse_expiry` helper shared by the STS and ECS paths, which had
+  duplicated the same two gaps. Real AWS always sends a `Z`, so this never
+  fired in production — it is a trap removed, not an outage explained.
 - **All three agents are deployed on their own vendor's hosting** — Cloud Run,
   AgentCore Runtime, Container Apps — and answer one question together from a
   Cloud Run coordinator: `3/3 clouds, agreed`, 2258–2511ms across three warm
@@ -265,7 +306,9 @@ Done and verified:
   [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md#what-the-controls-actually-proved-2026-08-07).
 - **The 3×3 matrix run hosted: 8/9**, the one red cell being interop finding 2
   — still ADK's own client against ADK's own server, now with two other clouds
-  beside it as controls.
+  beside it as controls. Of those cells, only six cross a vendor boundary: the
+  coordinator and the GCP agent are both on Cloud Run, and the matrix now marks
+  that column instead of letting three in-cloud hops pad the interop score.
 - Deploying found what a green suite had not, twice: two defects on the first
   GCP leg (a 401 misfiled as a protocol failure, a totally failed run exiting
   0), and on Azure a leg reporting `entra-fic` in front of a public ingress.
@@ -285,7 +328,8 @@ Not done:
 - **Roughly 32 tests are gone.** The 2026-08-02 session left 92 passing; this
   repo has 60, because that work was recovered from a Cloud Build tarball and
   `.gcloudignore` excludes `tests/`. What they covered is unknown. The
-  surviving 71 (60 + 11 skipped) pass.
+  surviving 71 (60 + 11 skipped) passed; the suite is now 96 (85 + 11)
+  after the in-cloud-hop and token-lifecycle work added twenty-five.
 - **Nothing outstanding on AWS scoping** — this one moved to the done list:
   the deployed policy is scoped to one runtime ARN, `Resource: "*"` is not
   required, and the predecessor's contrary finding was a misdiagnosis. See
@@ -297,8 +341,14 @@ Not done:
   claim untenable. The matrix cells have no distribution behind them and order
   nothing safely.
 - **The AWS STS and Entra paths are proven end to end, but only on the happy
-  path plus one denial each.** Token expiry, refresh and clock skew have never
-  been exercised against either provider.
+  path plus one denial each.** No token has ever expired in production: every
+  deployed run is a Cloud Run job that lives a few seconds, so the refresh
+  branches never execute there. They are now covered hermetically instead —
+  the skew window, STS credentials that expire mid-run or arrive already
+  expired, a short-lived Entra token, and an unreadable `exp` — because expiry
+  is a clock question rather than a network one. What is still untested is a
+  *real* aged token from either provider, and genuine clock skew between the
+  coordinator's clock and theirs.
 - `llm` mode is implemented but has been exercised for none of the three
   clouds; all measurements here are direct-brain.
 - No token or cost accounting. Warm/cold is now labelled everywhere it is
