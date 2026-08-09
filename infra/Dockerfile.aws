@@ -23,12 +23,21 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# strands-agents WAS omitted here on the reasoning below. The reasoning was
+# sound and the consequence was not: the deployed agent accepted
+# CURRENCY_MODEL_MODE=llm and then failed on import, so the one mode this image
+# could not serve was also the one it advertised no objection to. It is a pure
+# -Python package; installing it unconditionally costs image size and removes a
+# configuration that could never work.
+#
+# Superseded reasoning, kept because it explains the original shape:
 # strands-agents is omitted: it is needed only for `llm` mode, and the matrix
 # runs `direct` so a red cell is unambiguously a protocol failure rather than a
 # throttled Bedrock call. See "keep the two axes separate" in
 # docs/DEPLOYMENT_PLAN.md.
 RUN pip install \
       "a2a-sdk[http-server]" \
+      strands-agents \
       pydantic \
       httpx \
       uvicorn

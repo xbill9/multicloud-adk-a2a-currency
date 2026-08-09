@@ -371,17 +371,24 @@ Not done:
   is a clock question rather than a network one. What is still untested is a
   *real* aged token from either provider, and genuine clock skew between the
   coordinator's clock and theirs.
-- **`llm` mode runs on all three clouds** (2026-08-09), having never produced
-  an answer anywhere before. Gemini via ADK over MCP and Nova via Strands run
-  locally; **Azure runs a model in production** — gpt-5-mini on AI Foundry,
-  deployed via `./infra/deploy_azure.sh foundry` and passing 3/3 of its hosted
-  matrix cells. Getting there needed code and infrastructure, not credentials:
-  six defects, all in [`docs/INTEROP.md`](docs/INTEROP.md).
-- **Only Azure's `llm` mode is deployed.** GCP and AWS were exercised on a
-  laptop against their real models; neither has been rebuilt, and
-  `Dockerfile.aws` still omits `strands-agents`, so the hosted AWS agent cannot
-  serve `llm` mode as built. Every other hosted number here is direct-brain,
-  and the mesh is now deliberately mixed — which the `brain=` label reports.
+- **`llm` mode runs on all three clouds, deployed** (2026-08-09), having never
+  produced an answer anywhere before. A hosted 8/9 with `brain=llm`: Gemini via
+  ADK over MCP on Cloud Run, Nova via Strands on AgentCore, gpt-5-mini via
+  Agent Framework on Container Apps. Nova is the fastest brain at 2.1–2.5s;
+  Gemini and gpt-5-mini run 4.4–12.3s. Getting there needed code and
+  infrastructure rather than credentials — nine defects, all written up in
+  [`docs/INTEROP.md`](docs/INTEROP.md), of which the one worth reading is that
+  **AgentCore silently drops the `A2A-Version` header**, so `a2a-sdk` assumes
+  0.3 and rejects a request its own handler cannot serve. Two clouds forward
+  it; the third does not.
+- **`llm` numbers are one run each.** The all-three-`llm` matrix has a single
+  execution behind it, unlike the direct-brain figures, which have five. Model
+  latency is also far noisier than protocol latency, so those cells order the
+  brains loosely at best.
+- **`direct` is the steady state and the mesh is back on it.** `llm` mode was
+  proved and then stood down: the matrix is a protocol instrument first, and a
+  model in the path turns a red cell into two possible explanations. All three
+  deploy scripts default to `direct` and take `MODEL_MODE=llm` to opt in.
 - ~~**The matrix's `brain=` label reads the wrong environment.**~~ Fixed
   2026-08-09. Every agent reports its own brain on `/health`, and the matrix
   asks each server rather than reading its own `CURRENCY_MODEL_MODE`. A mixed

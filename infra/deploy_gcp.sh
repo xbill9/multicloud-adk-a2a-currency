@@ -31,6 +31,14 @@ MATRIX_JOB="${MATRIX_JOB:-currency-matrix}"
 COORDINATOR_SA="${COORDINATOR_SA:-currency-coordinator@${PROJECT}.iam.gserviceaccount.com}"
 #: No --cloud flag, so coordinator.cli defaults to all three participants.
 THREE_CLOUD_ARGS="-m,coordinator.cli,100,USD,EUR,JPY"
+
+# `direct` stays the default, for the reason in docs/DEPLOYMENT_PLAN.md: the
+# matrix is a protocol instrument, and a model in the path makes a red cell
+# ambiguous. MODEL_MODE=llm deploys the brain. ADK does not use ADC for
+# Gemini, hence GOOGLE_GENAI_USE_VERTEXAI and the project/location pair --
+# without them it asks for an API key and fails inside a task body with
+# HTTP 200.
+MODEL_MODE="${MODEL_MODE:-direct}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO_NAME}/currency-mesh:latest"
 
 service_url() {
@@ -61,7 +69,7 @@ deploy() {
     --region "$REGION" --project "$PROJECT" \
     --no-allow-unauthenticated \
     --port 8080 \
-    --set-env-vars CURRENCY_MODEL_MODE=direct,HOST=0.0.0.0 \
+    --set-env-vars "CURRENCY_MODEL_MODE=${MODEL_MODE},HOST=0.0.0.0,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_LOCATION=${REGION}" \
     --min-instances 0 --max-instances 2 \
     --quiet
 

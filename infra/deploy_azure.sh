@@ -47,6 +47,10 @@ DOCKER="${DOCKER:-docker}"
 # This was hard-coded to 1 while the deployed app sat at 0, so the scripts
 # disagreed with the cloud and the cold starts read as a property of Azure.
 # Set MIN_REPLICAS=1 to warm it for a measurement run; `$0 scale 0` to undo.
+# `direct` stays the default here too, so a plain `deploy` cannot silently
+# put a billable model into the mesh. MODEL_MODE=llm opts in.
+MODEL_MODE="${MODEL_MODE:-direct}"
+
 MIN_REPLICAS="${MIN_REPLICAS:-0}"
 MAX_REPLICAS="${MAX_REPLICAS:-2}"
 
@@ -109,14 +113,14 @@ deploy() {
       --registry-username "$ACR" --registry-password "$pw" \
       --target-port 8080 --ingress external \
       --min-replicas "$MIN_REPLICAS" --max-replicas "$MAX_REPLICAS" \
-      --env-vars CURRENCY_MODEL_MODE=direct HOST=0.0.0.0 PORT=8080 -o none
+      --env-vars "CURRENCY_MODEL_MODE=${MODEL_MODE}" HOST=0.0.0.0 PORT=8080 -o none
   fi
 
   url="$(app_url)"
   # Two-phase, as on both other clouds: the card must advertise an ingress FQDN
   # that does not exist until the app does.
   az containerapp update -n "$APP" -g "$RG" \
-    --set-env-vars "PUBLIC_URL=${url}" CURRENCY_MODEL_MODE=direct HOST=0.0.0.0 PORT=8080 -o none
+    --set-env-vars "PUBLIC_URL=${url}" "CURRENCY_MODEL_MODE=${MODEL_MODE}" HOST=0.0.0.0 PORT=8080 -o none
 
   echo
   echo "container app : $url"

@@ -62,7 +62,7 @@ def hop_kind(server: Server, from_cloud: str | None) -> str:
     return "in-cloud" if server.name.lower() == from_cloud else "cross-cloud"
 
 
-async def server_brain(server: Server, *, timeout_s: float = 10.0) -> str:
+async def server_brain(server: Server, *, timeout_s: float = 45.0) -> str:
     """Ask the agent which brain it is running.
 
     Carries the peer's credential, because /health sits behind the same
@@ -75,21 +75,43 @@ async def server_brain(server: Server, *, timeout_s: float = 10.0) -> str:
     not answer must degrade to "unknown" rather than fail a cell or, worse,
     inherit the runner's own CURRENCY_MODEL_MODE -- which is what it used to
     do, and how a run against three `llm` agents came to print brain=direct.
+
+    The timeout is generous because every service here scales to zero and this
+    is the *first* request of a run: at 10s it reported Azure as "unknown"
+    purely because a cold Container App takes ~20s to answer, which is an
+    honest label of the wrong thing.
     """
-    url = f"{server.endpoint.rstrip('/')}/health"
     try:
         auth = credentials_for(server.name, server.endpoint)
     except AdapterError:
         auth = None
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s, auth=auth) as client:
-            response = await client.get(url)
-        if not response.is_success:
+
+    base = server.endpoint.rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout_s, auth=auth) as client:
+        # /health first: it is the direct answer where the path is reachable.
+        try:
+            response = await client.get(f"{base}/health")
+            if response.is_success:
+                brain = response.json().get("brain")
+                if isinstance(brain, str) and brain:
+                    return brain
+        except (httpx.HTTPError, ValueError):
+            pass
+
+        # Then the agent card, for stacks that do not expose arbitrary paths.
+        # AgentCore serves only its own /invocations and /ping contract, so
+        # /health cannot be fetched there however the agent is configured.
+        try:
+            response = await client.get(f"{base}/.well-known/agent-card.json")
+            if not response.is_success:
+                return "unknown"
+            for skill in response.json().get("skills") or []:
+                for tag in skill.get("tags") or []:
+                    if isinstance(tag, str) and tag.startswith("brain:"):
+                        return tag.split(":", 1)[1] or "unknown"
+        except (httpx.HTTPError, ValueError, AttributeError):
             return "unknown"
-        brain = response.json().get("brain")
-    except (httpx.HTTPError, ValueError):
-        return "unknown"
-    return brain if isinstance(brain, str) and brain else "unknown"
+    return "unknown"
 
 
 async def probe(

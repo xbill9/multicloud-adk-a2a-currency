@@ -34,6 +34,20 @@ DOCKER="${DOCKER:-docker}"
 # authorization; the :sub condition is what binds this to one identity.
 AUDIENCE="${AWS_A2A_AUDIENCE:-sts.amazonaws.com}"
 
+# `llm` mode's model, and the two ARNs the exec role needs to invoke it. A
+# cross-region inference profile (the `us.` prefix) is not itself sufficient:
+# the grant must name both the profile in this account and the underlying
+# foundation model, which is regionless in the ARN. Scoped to this one model
+# rather than "*", consistent with the least-privilege finding for
+# InvokeAgentRuntime in docs/DEPLOYMENT_PLAN.md.
+BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-us.amazon.nova-micro-v1:0}"
+BEDROCK_MODEL_BASE="${BEDROCK_MODEL_BASE:-${BEDROCK_MODEL_ID#us.}}"
+
+# `direct` stays the default: the matrix is a protocol instrument first, and a
+# model in the path turns a red cell into two possible explanations. Set
+# MODEL_MODE=llm to deploy the brain, and set it back afterwards.
+MODEL_MODE="${MODEL_MODE:-direct}"
+
 GCP_PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 MASTER_SA="${COORDINATOR_SA:-currency-coordinator@${GCP_PROJECT}.iam.gserviceaccount.com}"
 
@@ -51,8 +65,11 @@ runtime_arn() {
   # Backoff rather than a fixed delay: a first attempt at 3x3s failed a wire
   # step whose very next manual retry, seconds later, succeeded -- so the
   # outage window is sometimes longer than the whole retry budget was.
+  # Budgeted at ~2 minutes rather than a fixed attempt count: 3x3s was too
+  # short, 5 attempts over 45s was still too short, and each time the very next
+  # manual call succeeded. The windows are minutes, not seconds.
   local attempt arn delay=3
-  for attempt in 1 2 3 4 5; do
+  for attempt in 1 2 3 4 5 6 7; do
     arn="$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
       --query "agentRuntimes[?agentRuntimeName=='${RUNTIME}'].agentRuntimeArn | [0]" \
       --output text 2>/dev/null)" || arn=""
@@ -61,7 +78,7 @@ runtime_arn() {
       echo "$arn"
       return 0
     fi
-    [[ "$attempt" -lt 5 ]] && { sleep "$delay"; delay=$((delay * 2)); }
+    [[ "$attempt" -lt 7 ]] && { sleep "$delay"; [[ "$delay" -lt 30 ]] && delay=$((delay * 2)); }
   done
   return 1
 }
@@ -147,10 +164,16 @@ build_and_push() {
 }
 
 ensure_exec_role() {
-  aws iam get-role --role-name "$ROLE_EXEC" >/dev/null 2>&1 && return 0
-  local account; account="$(account_id)"
+  local account created=0; account="$(account_id)"
 
-  aws iam create-role --role-name "$ROLE_EXEC" \
+  # The inline policy is re-applied on every run, not just at creation. It used
+  # to return early when the role existed, which meant any later addition --
+  # such as the Bedrock grant below, without which `llm` mode 403s -- silently
+  # never reached an already-deployed role. put-role-policy overwrites, so this
+  # is idempotent.
+  if ! aws iam get-role --role-name "$ROLE_EXEC" >/dev/null 2>&1; then
+    created=1
+    aws iam create-role --role-name "$ROLE_EXEC" \
     --assume-role-policy-document "{
       \"Version\": \"2012-10-17\",
       \"Statement\": [{
@@ -160,6 +183,7 @@ ensure_exec_role() {
         \"Condition\": {\"StringEquals\": {\"aws:SourceAccount\": \"${account}\"}}
       }]
     }" >/dev/null
+  fi
 
   aws iam put-role-policy --role-name "$ROLE_EXEC" \
     --policy-name agentcore-runtime \
@@ -183,11 +207,21 @@ ensure_exec_role() {
             \"logs:PutLogEvents\"
           ],
           \"Resource\": \"arn:aws:logs:${REGION}:${account}:*\"
+        },
+        {
+          \"Effect\": \"Allow\",
+          \"Action\": [\"bedrock:InvokeModel\", \"bedrock:InvokeModelWithResponseStream\"],
+          \"Resource\": [
+            \"arn:aws:bedrock:*::foundation-model/${BEDROCK_MODEL_BASE}\",
+            \"arn:aws:bedrock:${REGION}:${account}:inference-profile/${BEDROCK_MODEL_ID}\"
+          ]
         }
       ]
     }"
-  echo "waiting for ${ROLE_EXEC} to propagate"
-  sleep 15
+  if [[ "$created" == 1 ]]; then
+    echo "waiting for ${ROLE_EXEC} to propagate"
+    sleep 15
+  fi
 }
 
 ensure_federated_role() {
@@ -280,7 +314,7 @@ deploy() {
     --role-arn "arn:aws:iam::${account}:role/${ROLE_EXEC}" \
     --network-configuration 'networkMode=PUBLIC' \
     --protocol-configuration 'serverProtocol=A2A' \
-    --environment-variables "PUBLIC_URL=${url},CURRENCY_MODEL_MODE=direct,HOST=0.0.0.0,PORT=9000" \
+    --environment-variables "PUBLIC_URL=${url},CURRENCY_MODEL_MODE=${MODEL_MODE},BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID},HOST=0.0.0.0,PORT=9000" \
     >/dev/null
 
   ensure_federated_role

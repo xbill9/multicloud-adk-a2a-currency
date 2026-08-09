@@ -15,7 +15,10 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill, Role
+from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, VERSION_HEADER
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -65,7 +68,12 @@ def build_agent_card(*, name: str, url: str, version: str = "0.1.0") -> AgentCar
                 id="currency_conversion",
                 name="currency conversion",
                 description=INSTRUCTION,
-                tags=["currency", "exchange-rate", "finance"],
+                # `brain:` rides on the card because /health is not reachable
+                # for every stack: AgentCore exposes only its own /invocations
+                # and /ping contract, so an arbitrary path on the container is
+                # unreachable from outside. The card is fetched over the same
+                # authenticated path the calls use, so it always is.
+                tags=["currency", "exchange-rate", "finance", f"brain:{model_mode()}"],
             )
         ],
     )
@@ -102,5 +110,35 @@ def build_app(executor: AgentExecutor, card: AgentCard) -> Starlette:
             *create_jsonrpc_routes(handler, "/"),
             Route("/health", health, methods=["GET"]),
             Route("/ping", ping, methods=["GET"]),
-        ]
+        ],
+        middleware=[Middleware(_AssumeCurrentProtocolVersion)],
     )
+
+
+class _AssumeCurrentProtocolVersion(BaseHTTPMiddleware):
+    """Treat a missing ``A2A-Version`` header as the current version, not 0.3.
+
+    a2a-sdk reads the protocol version from that header and, when it is absent,
+    assumes ``0.3`` and then rejects the request its own handler cannot serve:
+    ``A2A version '0.3' is not supported by this handler. Expected version
+    '1.0'``. A missing header is not evidence of an old client -- it is no
+    evidence at all.
+
+    This matters because **AgentCore does not forward the header**. Cloud Run
+    and Container Apps pass it through untouched, so the same client, the same
+    a2a-sdk on both ends, and the same server code succeed on two clouds and
+    fail on the third. It surfaced the moment the AWS image was rebuilt onto a
+    current a2a-sdk (2026-08-09); the previously deployed image predated the
+    version check, which is why the leg had been green while carrying it.
+
+    Scoped deliberately to *absent*: a header that says 0.3 is a real client
+    statement and is still rejected.
+    """
+
+    async def dispatch(self, request, call_next):
+        if VERSION_HEADER.lower() not in {k.lower() for k in request.headers}:
+            request.scope["headers"] = [
+                *request.scope["headers"],
+                (VERSION_HEADER.lower().encode(), PROTOCOL_VERSION_CURRENT.encode()),
+            ]
+        return await call_next(request)

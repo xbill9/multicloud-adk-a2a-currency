@@ -306,3 +306,59 @@ def test_local_report_says_nothing_about_boundaries():
     assert "2/2 attempted cells succeeded" in table
     assert "*" not in table
     assert "crossed a cloud boundary" not in table
+
+
+def test_a_missing_version_header_is_not_read_as_a_0_3_client():
+    """AgentCore does not forward A2A-Version; absent must not mean 0.3.
+
+    a2a-sdk defaults a missing header to 0.3 and then rejects it as
+    unsupported, so the same code passed on Cloud Run and Container Apps and
+    failed behind AgentCore with
+    "A2A version '0.3' is not supported by this handler".
+    """
+    from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, VERSION_HEADER
+    from starlette.testclient import TestClient
+
+    from agents.serving import build_agent_card, build_app, direct_executor
+
+    card = build_agent_card(name="currency_agent", url="http://testserver/")
+    seen: dict[str, str] = {}
+
+    app = build_app(direct_executor(), card)
+
+    async def echo(request):
+        from starlette.responses import JSONResponse
+
+        seen["version"] = request.headers.get(VERSION_HEADER, "<absent>")
+        return JSONResponse({"v": seen["version"]})
+
+    app.router.add_route("/echo-version", echo, methods=["GET"])
+
+    with TestClient(app) as client:
+        # No A2A-Version header, exactly as AgentCore delivers it.
+        body = client.get("/echo-version").json()
+
+    assert body["v"] == PROTOCOL_VERSION_CURRENT
+
+
+def test_an_explicit_old_version_is_still_rejected():
+    """The middleware fills a gap; it must not overwrite a real client claim."""
+    from a2a.utils.constants import VERSION_HEADER
+    from starlette.responses import JSONResponse
+    from starlette.testclient import TestClient
+
+    from agents.serving import build_agent_card, build_app, direct_executor
+
+    app = build_app(
+        direct_executor(), build_agent_card(name="currency_agent", url="http://testserver/")
+    )
+
+    async def echo(request):
+        return JSONResponse({"v": request.headers.get(VERSION_HEADER, "<absent>")})
+
+    app.router.add_route("/echo-version", echo, methods=["GET"])
+
+    with TestClient(app) as client:
+        body = client.get("/echo-version", headers={VERSION_HEADER: "0.3"}).json()
+
+    assert body["v"] == "0.3"

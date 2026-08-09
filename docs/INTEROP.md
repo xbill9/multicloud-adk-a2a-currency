@@ -419,6 +419,95 @@ there is no such path to fetch. Rather than guess, the label says it does not
 know — which is the whole point of replacing a value that was confidently
 wrong.
 
+## Three clouds, three models, deployed (2026-08-09)
+
+`llm` mode on all three vendors' hosting at once, 8/9, the red cell still
+finding 2. Every column is a real model reached through its own vendor's
+framework:
+
+```console
+A2A interop matrix  (100 USD -> EUR, GBP, brain=llm)
+
+client \ server  gcp*              aws               azure
+a2a-sdk          ok 10116ms        ok 2364ms         ok 12256ms
+agent-framework  ok 4354ms         ok 2094ms         ok 6953ms
+google-adk       transport         ok 2515ms         ok 8291ms
+
+8/9 attempted cells succeeded
+  of which 6 crossed a cloud boundary and 2 did not
+```
+
+`brain=llm` collapses to one word only because all three servers agreed; the
+label is per-server and says `mixed (...)` otherwise. Nova is the fastest brain
+here by a wide margin (2.1–2.5s); Gemini and gpt-5-mini are 4.4–12.3s, and
+gpt-5-mini is a reasoning model called across regions.
+
+### AgentCore drops the `A2A-Version` header
+
+The find of the day, and it only appears in a mesh. `a2a-sdk` reads the
+protocol version from an `A2A-Version` request header and, when it is
+**absent**, assumes `0.3` and rejects the request its own handler cannot
+serve:
+
+```
+Version mismatch: actual='0.3', expected='1.0'
+A2A version '0.3' is not supported by this handler. Expected version '1.0'.
+```
+
+Cloud Run and Container Apps forward that header untouched. AgentCore does not.
+So the same client, the same `a2a-sdk` 1.1.2 on both ends, and the same server
+code succeed on two clouds and fail on the third — with an error that blames
+the protocol version and names nothing about the platform that removed it.
+
+It had been latent for a week. The deployed AWS image dated from 2026-08-02 and
+predated the version check; rebuilding it onto a current `a2a-sdk` is what
+exposed a gap that was there all along. **The AWS leg's green cells had been
+green for a reason that stopped being true the moment the image was rebuilt.**
+
+`agents/serving.py` now fills the header when it is missing, and only when it
+is missing — a header that says `0.3` is a real client statement and is still
+rejected. Absent is not evidence of an old client; it is no evidence at all.
+
+### google-adk 2.6.3 does not work with mcp 2.0
+
+Measured, and the reason `mcp<2` is pinned in the root `Dockerfile`:
+
+```
+ImportError: cannot import name 'McpHttpClientFactory'
+             from 'mcp.client.streamable_http'
+ModuleNotFoundError: No module named 'mcp.shared.session'
+```
+
+`mcp` 2.0 moved both; ADK 2.6.3 still imports them. ADK wraps those imports in
+a bare `try/except`, so the failure surfaces as an empty `__all__` and then as
+`ImportError: cannot import name 'McpToolset'` at container start — which Cloud
+Run reports only as "failed to start and listen on port 8080". Three layers
+between the cause and anything that names MCP. 2.6.3 + `mcp` 1.29.0 serves.
+
+### A stale local install hid all of it
+
+The local interpreter had `google-adk` 2.5.0 in `~/.local` shadowing 2.6.3 in
+the system path, and 2.5.0 exports `McpToolset` regardless. So `llm` mode
+passed locally and died in the container, twice, for a reason no local run
+could reproduce. The shadow is removed; local and container now resolve the
+same versions. This is what CLAUDE.md's "latest everything" rule is protecting
+against, and it was being violated silently by an install nobody made on
+purpose.
+
+### Two smaller ones
+
+**The Bedrock grant never reached the deployed role.** `ensure_exec_role`
+returned early when the role already existed, so the `bedrock:InvokeModel`
+statement added for `llm` mode was written only into roles that did not exist
+yet. The policy is now re-applied on every run; `put-role-policy` overwrites,
+so it is idempotent. Scoped to the one inference profile and its underlying
+foundation model rather than `*`.
+
+**The brain probe timed out on a cold Azure.** At 10s it reported `unknown`
+for a Container App that simply takes ~20s to wake, which is an honest label
+of the wrong thing. Now 45s, because this is the first request of a run and
+every service here scales to zero.
+
 ## What is deliberately not claimed
 
 - Latencies in the nine-cell matrix are local and direct-brain. They measure
