@@ -24,8 +24,8 @@ Run, so **the GCP leg is an in-cloud hop, not a cross-cloud one**. Two of the
 three legs cross a vendor boundary; the third is Cloud Run reaching Cloud Run,
 and the matrix now marks it rather than letting it pad the score.
 
-**Prior art.** A search on 2026-08-09 for cross-vendor A2A interop testing found
-none. The closest work is adjacent: the official
+**Prior art.** A search on 2026-08-09 did not turn up cross-vendor A2A interop
+testing. The closest work is adjacent: the official
 [`a2a-tck`](https://github.com/a2aproject/a2a-tck) validates a single
 implementation against the *spec*, locally;
 [`a2a-inspector`](https://github.com/a2aproject/a2a-inspector) validates one
@@ -127,9 +127,9 @@ google-adk       transport         ok 5953ms         ok 471ms
 Six of the eight passing cells crossed a vendor boundary. The other two are
 Cloud Run reaching Cloud Run, and no longer count toward the interop claim.
 
-Three client SDKs × three natively-served agents — though see **How
-independent the axes actually are** under Architecture before reading that as
-nine independent experiments. Every cell is one real A2A
+Three client SDKs × three natively-served agents; see **How independent the
+axes are** under Architecture for what that does and does not mean. Every cell
+is one real A2A
 call; a failed cell records which layer broke (`transport`, `protocol`,
 `timeout`, `authentication`, `provider`) rather than just failing — the
 classification walks the vendor SDK's exception chain, because every stack here
@@ -190,8 +190,8 @@ SigV4 for AgentCore, and an Entra Federated Identity Credential exchange for
 Container Apps. Three clouds, three mechanisms, **no stored secret** — the
 coordinator's host is the only thing that makes that possible.
 
-**How independent the axes actually are**, because the grid overstates it and
-the overstatement is easy to check:
+**How independent the axes are.** The grid reads as nine separate experiments
+and it is worth being precise about that:
 
 - **Servers: two stacks, not three.** `agents/aws/server.py` and
   `agents/azure/server.py` both build on `agents/serving.py` — same Starlette
@@ -201,12 +201,12 @@ the overstatement is easy to check:
   `a2a-sdk>=1.0.0,<2` and `google-adk` requires `a2a-sdk>=0.3.4,<2`. All three
   client stacks resolve to the same wire implementation.
 
-So nine cells is a presentation, not nine independent experiments. That makes
-the failures more interesting rather than less: shared implementation on both
-ends should make interop trivial, and it did not — a platform still stripped a
-protocol header and a framework still advertised an unreachable address. The
-client side is symmetric in the sense that matters operationally: any of the
-three can drive the whole mesh (`--client agent-framework`).
+So the nine cells are a presentation rather than nine independent experiments.
+It is worth noting what that implies about the failures: shared implementation
+on both ends might be expected to make interop straightforward, and it did not
+— a platform stripped a protocol header, and a framework advertised an
+unreachable address. Operationally the client side is still symmetric: any of
+the three can drive the whole mesh (`--client agent-framework`).
 
 | Layer | Module |
 |---|---|

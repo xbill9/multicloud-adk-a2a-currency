@@ -25,14 +25,13 @@ live precisely where nobody looks:
   reproduced on AgentCore with two control clouds forwarding the same header
   untouched, plus a fix.
 
-Everything below exists to protect that pair from the objections that would
-otherwise sink them — and to keep the second one described accurately, since
-overstating it is the fastest way to lose the first.
+The rest of this document is about describing that pair accurately and
+answering the obvious objections to them.
 
 ## Two structural facts, verified 2026-08-09
 
-These are the sharpest objections available to a hostile reader, and both are
-true. They were checked in the code, not assumed.
+Both are likely objections from a careful reader, and both are true. They were
+checked in the code rather than assumed.
 
 **The client axis is one transport with three façades.** All three "independent
 client stacks" resolve to the same library: `agent-framework-a2a` requires
@@ -51,11 +50,11 @@ So "3 client SDKs × 3 serving stacks" is closer to *three façades over one
 transport × two HTTP stacks*. Nine cells is a presentation, not nine
 independent experiments.
 
-**This should be led with, not hidden.** Shared implementation on both ends
-ought to make interop trivial. It did not: a platform still stripped a header
-and a framework still advertised an unreachable address. That is a sharper
-result than nine green cells, and it is only available to someone who states
-the dependency honestly.
+Worth stating up front rather than leaving to be discovered. Shared
+implementation on both ends might be expected to make interop straightforward,
+and it did not — a platform still stripped a header and a framework advertised
+an unreachable address. That reading is only available if the shared dependency
+is stated.
 
 ## The work, in priority order
 
@@ -147,9 +146,9 @@ thesis on the first two.
 **Lead with the retraction.** Withdrawing the "`agent-framework` → AWS is
 reproducibly ~5.7s, unexplained" claim — and stating that the evidence to
 falsify it was already on the page, because the slow cell *moved between
-clients* and a fixed per-client cost cannot move — is the most credible thing in
-the repo. A project that publicly retracts its own finding earns the benefit of
-the doubt on the ones it keeps.
+clients* and a fixed per-client cost cannot move — is worth including. A
+project that retracts its own finding gives a reader some reason to trust the
+ones it keeps.
 
 **Stop implying the latency tables are comparative.** They are labelled, but
 tables invite comparison regardless. The `llm` figures especially: single runs
@@ -161,7 +160,7 @@ is a demo, and demos are cheap. Rather: *here is a falsification apparatus for
 interop claims, and it found defects that vendor test suites structurally
 cannot.* That thesis survives every objection in this document.
 
-## Not worth doing
+## Lower priority, or probably not worth it
 
 - **More clouds.** A fourth vendor adds cells without addressing a single
   weakness above. Breadth is not the problem; independence is.

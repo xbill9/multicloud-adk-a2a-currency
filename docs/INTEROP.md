@@ -420,8 +420,7 @@ accepted `CURRENCY_MODEL_MODE=llm` and then failed on import, exactly the way
 **AWS reads `unknown` and that is honest.** The brain probe GETs `/health` on
 the server's endpoint, and AgentCore's endpoint ends in `/invocations/`, so
 there is no such path to fetch. Rather than guess, the label says it does not
-know — which is the whole point of replacing a value that was confidently
-wrong.
+know, which seems better than the confidently wrong value it replaced.
 
 ## Three clouds, three models, deployed (2026-08-09)
 
@@ -448,8 +447,8 @@ gpt-5-mini is a reasoning model called across regions.
 
 ### AgentCore drops the `A2A-Version` header
 
-**A confirmation, not a discovery** — and worth stating in that order, because
-the mechanism was already known. The predecessor series identified a proxy
+**A confirmation rather than a discovery**, since the mechanism was already
+known. The predecessor series identified a proxy
 silently stripping this header, including the detail that a *missing* header
 then reads as an old client; it was written into `docs/ARTICLE_PLAN.md` before
 this mesh existed. What is new here is narrower: it reproduced on **AgentCore

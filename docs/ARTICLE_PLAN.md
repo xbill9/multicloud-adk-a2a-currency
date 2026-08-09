@@ -9,16 +9,16 @@ See `CLAUDE.md`.
 
 ## Tone and scope — read this first
 
-**The subject is strategy: cross-cloud auth, deployment topology, and the
-scaffolding that makes either reproducible.** Everything else is out.
+The subject is strategy: cross-cloud auth, deployment topology, and the
+scaffolding that supports both. Other material should generally stay out.
 
 The repo's own working notes are deliberately exhaustive about small failures,
 because that is what working notes are for. An article is not working notes. A
 reader who came for "how do I make an agent in one cloud call an agent in
 another without a stored secret" does not need to be walked through a missing
 package or a build-cache miss, and printing that material has two costs: it
-buries the two findings that matter, and it invites the reader to conclude the
-whole project is a catalogue of ordinary friction.
+crowds out the findings, and it invites the reader to conclude the project is
+mostly a catalogue of ordinary friction.
 
 **In scope**
 
@@ -47,16 +47,17 @@ whole project is a catalogue of ordinary friction.
 - The author's process — what was tried, in what order, what went wrong on the
   way. State the finding, not the search.
 
-**The test.** Before including anything, ask: *would this have happened to any
-competent engineer on any project, in any language, on one cloud?* If yes, it
-is not a finding. It is Tuesday. Cut it.
+**A rough test.** Before including anything, ask: *would this have happened on
+a single-cloud project in any language?* If so, it is probably ordinary
+development friction and can come out.
 
 **The one deliberate exception** is a failure whose *shape* is the point — the
 recurring pattern where a broken thing reports success. A whole cloud
 configured as an empty string and exiting 0, a run reporting `1/1 clouds` while
 three were wired, an agent serving with no tools behind a healthy `/health`.
-That is a claim about distributed-systems observability and it earns space. The
-individual bugs behind it do not; the pattern does.
+The pattern says something about observability in distributed systems that the
+individual bugs do not, so the pattern is worth including and the bugs are
+not.
 
 ---
 
