@@ -209,6 +209,13 @@ it belongs in the repo, not here.
 
 ---
 
+## Drafted
+
+`docs/article-cross-cloud-auth.md` is a first draft merging **A** and **C** —
+auth strategy, deployment strategy and scaffolding for one audience, since they
+share a reader and a spine. Article **B**, the interop findings, is not written
+and should stay separate.
+
 ## Splitting the overlap deliberately
 
 Three items could plausibly land in either article. Assign once, reference
