@@ -26,6 +26,9 @@ and the matrix now marks it rather than letting it pad the score.
 
 See [`docs/INTEROP.md`](docs/INTEROP.md) and
 [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md).
+[`docs/FOLLOWUP.md`](docs/FOLLOWUP.md) is the critical read: what this project
+demonstrates versus what it says it demonstrates, and the work that would close
+the gap. None of it is done.
 
 ## The demo
 
