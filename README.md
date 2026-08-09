@@ -245,6 +245,13 @@ All three agents also run on their own vendor's hosting, reached from one
 coordinator with **no long-lived secret anywhere in the mesh**. Deploy each
 cloud with its own script, then wire the coordinator to all three:
 
+Every AWS verb preflights its credentials first: if the ambient ones do not
+work it captures a fresh set with `./save-aws-creds.sh` and re-injects them,
+and if that cannot help it says so and names `aws login` rather than failing
+somewhere further in. It cannot refresh a dead session, and it cannot rescue a
+shell whose `AWS_*` variables are wrong — environment wins the AWS credential
+chain, so re-exporting returns the same broken values.
+
 ```bash
 ./infra/deploy_aws.sh   deploy   # AgentCore Runtime + the federated role
 ./infra/deploy_azure.sh deploy   # Container App

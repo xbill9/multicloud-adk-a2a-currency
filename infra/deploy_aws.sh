@@ -53,6 +53,62 @@ MASTER_SA="${COORDINATOR_SA:-currency-coordinator@${GCP_PROJECT}.iam.gserviceacc
 
 account_id() { aws sts get-caller-identity --query Account --output text; }
 
+# Credential preflight, run before anything that would fail confusingly without
+# it. Be clear about what this can and cannot do, because the obvious reading
+# is wrong in two ways.
+#
+# save-aws-creds.sh runs `aws configure export-credentials`, which *exports
+# credentials that already exist*. It cannot refresh a dead session -- when the
+# session expired on 2026-08-09 the script failed too. So this is capture and
+# re-inject, never a retry that conjures a session.
+#
+# And it cannot rescue a shell whose AWS_* environment variables are wrong:
+# environment sits at the top of the AWS credential chain, so export-credentials
+# would faithfully re-export the same broken values. Measured, not assumed --
+# that case was written first and then failed its own test.
+#
+# What is left is narrow but real:
+#
+#   1. ambient credentials work         -> proceed
+#   2. no usable ambient credentials,
+#      but $CREDS_FILE holds live ones  -> source it, proceed
+#   3. neither                          -> only `aws login` fixes it; say so
+#
+# Case 2 is the one that earns its place: a fresh shell, or a cron/CI context
+# with no profile, running against credentials captured earlier.
+CREDS_FILE="${CREDS_FILE:-${REPO}/.aws_creds}"
+
+ensure_aws_credentials() {
+  aws sts get-caller-identity >/dev/null 2>&1 && return 0
+
+  echo "aws credentials are not usable in this shell; trying save-aws-creds.sh" >&2
+  if [[ -x "$REPO/save-aws-creds.sh" ]] \
+     && (cd "$REPO" && ./save-aws-creds.sh "$CREDS_FILE" >/dev/null 2>&1); then
+    # shellcheck disable=SC1090
+    set -a; . "$CREDS_FILE"; set +a
+    if aws sts get-caller-identity >/dev/null 2>&1; then
+      echo "recovered from ${CREDS_FILE}" >&2
+      return 0
+    fi
+  fi
+
+  # A previously captured file is the last resort: it may hold credentials from
+  # a session that is still valid even though this shell cannot see them.
+  if [[ -r "$CREDS_FILE" ]]; then
+    # shellcheck disable=SC1090
+    set -a; . "$CREDS_FILE"; set +a
+    if aws sts get-caller-identity >/dev/null 2>&1; then
+      echo "recovered from the existing ${CREDS_FILE}" >&2
+      return 0
+    fi
+  fi
+
+  echo "error: no usable AWS credentials, and save-aws-creds.sh cannot make any." >&2
+  echo "       the session itself is gone -- re-authenticate, then re-run:" >&2
+  echo "         aws login          (or: aws sso login)" >&2
+  return 1
+}
+
 runtime_arn() {
   # Retried because bedrock-agentcore-control intermittently fails this call
   # with `ValidationException ... CreateOAuth2Token ... the provided
@@ -453,6 +509,14 @@ roles_only() {
     ensure_federated_role
   fi
 }
+
+# Every verb below talks to AWS, so the preflight runs once here rather than
+# being repeated (and forgotten) in each one. `trust-policy` is the exception:
+# it only renders JSON and is useful with no credentials at all.
+case "${1:-deploy}" in
+  trust-policy) ;;
+  *) ensure_aws_credentials || exit 1 ;;
+esac
 
 case "${1:-deploy}" in
   deploy) deploy ;;
