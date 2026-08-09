@@ -13,20 +13,21 @@ The architecture is not novel — cross-cloud workload identity federation,
 median consensus, and multi-cloud agent demos all exist. What is unusual is the
 **off-diagonal**: running every vendor's client against every other vendor's
 server. Vendors test their client against their own server, so interop defects
-live precisely where nobody looks, and both of this project's real findings came
-from there:
+live precisely where nobody looks:
 
-- `to_a2a()` advertises the container's bind address, so ADK's own client cannot
-  reach ADK's own server once hosted — and both halves pass Google's tests.
-- AgentCore strips the `A2A-Version` header, so `a2a-sdk` assumes `0.3` and
-  rejects a request its own handler cannot serve.
+- **`to_a2a()` advertises the container's bind address**, so ADK's own client
+  cannot reach ADK's own server once hosted — and both halves pass Google's
+  tests. This is the finding, and it is genuinely off-diagonal.
+- **AgentCore strips the `A2A-Version` header**, so `a2a-sdk` assumes `0.3` and
+  rejects a request its own handler cannot serve. This is a *confirmation*, not
+  a discovery — see the correction at the end of this document. The predecessor
+  series had already identified the mechanism; what is new is that it
+  reproduced on AgentCore with two control clouds forwarding the same header
+  untouched, plus a fix.
 
-The second is the better result: not a bug in anyone's A2A implementation, but a
-*platform* removing protocol-relevant metadata, which no single-vendor test can
-see by construction.
-
-Everything below exists to protect those two findings from the objections that
-would otherwise sink them.
+Everything below exists to protect that pair from the objections that would
+otherwise sink them — and to keep the second one described accurately, since
+overstating it is the fastest way to lose the first.
 
 ## Two structural facts, verified 2026-08-09
 
@@ -171,11 +172,35 @@ cannot.* That thesis survives every objection in this document.
   documented. Fixing it would remove the project's clearest example of a defect
   that a vendor's own tests cannot see.
 
-## Caveat on all of it
+## The novelty caveat, now checked (2026-08-09)
 
-The novelty judgement above is made against this space as generally known and
-against this project's own predecessor series — not a systematic literature
-review. If cross-vendor A2A conformance testing has been published, items 1 and
-2 become table stakes rather than differentiators, and the defensible
-contribution narrows to the two specific defects. Someone should check before
-the framing is committed to in an article.
+The earlier draft of this document said someone should search for published
+cross-vendor A2A conformance work before committing to a framing. That search
+has been done — a basic one, not a systematic review — and the result is
+recorded in `docs/ARTICLE_PLAN.md` under "Prior art".
+
+Short version: **no third-party cross-vendor interop testing was found.** The
+official `a2a-tck` validates one implementation against the *spec*, locally.
+`a2a-inspector` validates a single agent. A2A issue #1755 measures reachability
+across 50 advertised endpoints and found 0% answered a correct `tasks/send` —
+breadth of availability, not depth of interop. The A2A roadmap lists expanded
+testing as planned.
+
+So items 1 and 2 above are **not** table stakes; the client-axis independence
+problem is a real differentiator to fix rather than a box already ticked.
+
+One correction this survey forced, and it matters more than the reassurance:
+**the AgentCore header-stripping finding is not a discovery.** The predecessor
+series had already identified a proxy stripping `A2A-Version`, and already
+understood that the server defaults a missing header to 0.3 — it was written
+into `docs/ARTICLE_PLAN.md` before this mesh existed. What is new is the
+mechanism reproduced on AgentCore specifically, with two control clouds
+forwarding the same header untouched, plus a fix. That is a confirmation with
+controls, which is a good result and not the same thing. Any framing that
+called it a discovery would be checked and found wanting.
+
+The real prior art is this author's own predecessor series, which will be found
+immediately by anyone assessing the work. Claim the delta and only the delta:
+N×M rather than pairwise, three clouds reached simultaneously, three-way median
+consensus, keyless on all three legs with per-leg controls, and the instrument
+framing.
