@@ -92,7 +92,11 @@ def build():
     )
 
     async def health(request):
-        return JSONResponse({"status": "ok", "agent": AGENT_NAME})
+        # Same contract as agents/serving.py: the agent reports its own brain,
+        # because the matrix cannot know it from its own environment.
+        return JSONResponse(
+            {"status": "ok", "agent": AGENT_NAME, "brain": model_mode()}
+        )
 
     a2a_app.add_route("/health", health, methods=["GET"])
     return a2a_app

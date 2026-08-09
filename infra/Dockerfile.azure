@@ -22,10 +22,18 @@ WORKDIR /app
 
 # agent-framework-a2a brings the A2AExecutor this column exists to test.
 # Unpinned, per CLAUDE.md.
+# agent-framework-foundry and azure-identity are what `llm` mode needs, and
+# they are separate distributions from agent-framework-core -- omitting them
+# meant the deployed agent could serve `direct` and nothing else, while
+# CURRENCY_MODEL_MODE=llm was accepted and then failed on import. They are
+# small and pure-Python, so they are installed unconditionally rather than
+# creating a second image variant that only one mode can use.
 RUN pip install \
       "a2a-sdk[http-server]" \
       agent-framework-core \
       agent-framework-a2a \
+      agent-framework-foundry \
+      azure-identity \
       pydantic \
       httpx \
       uvicorn

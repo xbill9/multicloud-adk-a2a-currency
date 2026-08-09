@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal
 
+import httpx
+
 from clients import CLIENT_STACKS, load_client
 from coordinator.auth import auth_mode, credentials_for
 from coordinator.errors import AdapterError
@@ -58,6 +60,36 @@ def hop_kind(server: Server, from_cloud: str | None) -> str:
     if from_cloud is None:
         return "local"
     return "in-cloud" if server.name.lower() == from_cloud else "cross-cloud"
+
+
+async def server_brain(server: Server, *, timeout_s: float = 10.0) -> str:
+    """Ask the agent which brain it is running.
+
+    Carries the peer's credential, because /health sits behind the same
+    privileged ingress as everything else -- Cloud Run's IAM, Container Apps'
+    Entra enforcement, AgentCore's SigV4. Probing it unauthenticated returns
+    403 and every deployed column would be labelled "unknown", which is the
+    one situation this label exists for.
+
+    Best effort otherwise by design: this is a label, and a server that will
+    not answer must degrade to "unknown" rather than fail a cell or, worse,
+    inherit the runner's own CURRENCY_MODEL_MODE -- which is what it used to
+    do, and how a run against three `llm` agents came to print brain=direct.
+    """
+    url = f"{server.endpoint.rstrip('/')}/health"
+    try:
+        auth = credentials_for(server.name, server.endpoint)
+    except AdapterError:
+        auth = None
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s, auth=auth) as client:
+            response = await client.get(url)
+        if not response.is_success:
+            return "unknown"
+        brain = response.json().get("brain")
+    except (httpx.HTTPError, ValueError):
+        return "unknown"
+    return brain if isinstance(brain, str) and brain else "unknown"
 
 
 async def probe(
@@ -133,23 +165,27 @@ async def run_matrix(
     contention instead of protocol overhead.
     """
     from_cloud = coordinator_cloud()
+    # Asked once per server rather than per cell: it is a property of the
+    # agent, not of the client dialling it.
+    brains = {server.name: await server_brain(server) for server in servers}
     cells: list[Cell] = []
     for stack in stacks:
         for server in servers:
-            cells.append(
-                await probe(
-                    stack,
-                    server,
-                    request,
-                    timeout_s=timeout_s,
-                    hop=hop_kind(server, from_cloud),
-                )
+            cell = await probe(
+                stack,
+                server,
+                request,
+                timeout_s=timeout_s,
+                hop=hop_kind(server, from_cloud),
             )
+            cells.append(cell.model_copy(update={"server_brain": brains[server.name]}))
     return MatrixReport(
         request_summary=(
             f"{request.amount} {request.source_currency} -> "
             f"{', '.join(request.target_currencies)}"
         ),
+        # Retained for compatibility with existing reports, but no longer the
+        # thing that gets printed: it describes the runner, not the mesh.
         model_mode=os.getenv("CURRENCY_MODEL_MODE", "direct"),
         cells=cells,
     )
@@ -163,7 +199,7 @@ def render_table(report: MatrixReport) -> str:
     columns = [max(len(header), 16) for header in headers]
 
     lines = [
-        f"A2A interop matrix  ({report.request_summary}, brain={report.model_mode})",
+        f"A2A interop matrix  ({report.request_summary}, brain={report.brain_summary})",
         "",
         "client \\ server".ljust(width)
         + "  "

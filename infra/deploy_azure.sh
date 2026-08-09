@@ -218,17 +218,137 @@ EOF
 }
 
 env_block() {
-  local app_id
-  app_id="$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv)"
+  # Resolved and validated before emitting, for the reason written up against
+  # deploy_aws.sh's env_block: a command substitution inside the heredoc runs
+  # in a subshell, so a failure there printed NAME= with nothing after it and
+  # still returned 0, and `wire` pushed the blank into the live coordinator.
+  # This is the same bug in the other sibling; fixing only the one that bit
+  # first would have left the trap armed here.
+  local app_id url tenant
+  app_id="$(az ad app list --display-name "$APP_REG" --query '[0].appId' -o tsv)" || return 1
+  url="$(app_url)" || return 1
+  tenant="$(az account show --query tenantId -o tsv)" || return 1
+
+  local pair
+  for pair in "AZURE_A2A_ENDPOINT:$url" "AZURE_A2A_CLIENT_ID:$app_id" \
+              "AZURE_A2A_TENANT_ID:$tenant"; do
+    case "${pair#*:}" in
+      ""|None)
+        echo "error: ${pair%%:*} did not resolve. Is the Container App deployed" >&2
+        echo "       and the '${APP_REG}' app registration created (\$0 fic)?" >&2
+        return 1
+        ;;
+    esac
+  done
+
   cat <<EOF
 # Add to the GCP master (Cloud Run job) to reach this agent:
-AZURE_A2A_ENDPOINT=$(app_url)
+AZURE_A2A_ENDPOINT=${url}
 AZURE_A2A_AUTH=entra-fic
-AZURE_A2A_TENANT_ID=$(az account show --query tenantId -o tsv)
+AZURE_A2A_TENANT_ID=${tenant}
 AZURE_A2A_CLIENT_ID=${app_id}
 # Defaults to <client-id>/.default; set explicitly only if the API exposes a
 # different scope.
 EOF
+}
+
+# `llm` mode's infrastructure, which is separate from everything above because
+# it is the only part of this mesh that is not free at idle.
+#
+# Two constraints drove the choices, and both are regional rather than design
+# preferences. FoundryChatClient speaks the OpenAI Responses API, and westus2 --
+# where the Container App lives -- offers no Azure OpenAI models at all, only
+# open-weight and partner ones. westus3 is the nearest region that has them, so
+# the account goes there and the model call is a cross-region hop; that shows up
+# in the Azure leg's latency and is not a Container Apps cost.
+#
+# The model is a reasoning model on purpose. agents/azure/server.py passes
+# store=False, and agent-framework then asks for reasoning.encrypted_content so
+# state can round-trip without server-side storage. gpt-4.1-mini rejects that
+# with "Encrypted content is not supported with this model", so the choice is
+# between a reasoning model and giving up store=False. Keeping store=False keeps
+# the conversation out of Azure's storage, which is worth more than the latency.
+FOUNDRY_ACCOUNT="${FOUNDRY_ACCOUNT:-currency-mesh-foundry}"
+FOUNDRY_PROJECT="${FOUNDRY_PROJECT:-currency-mesh-proj}"
+FOUNDRY_LOCATION="${FOUNDRY_LOCATION:-westus3}"
+FOUNDRY_DEPLOYMENT="${FOUNDRY_DEPLOYMENT:-currency-reasoning}"
+FOUNDRY_MODEL="${FOUNDRY_MODEL:-gpt-5-mini}"
+
+foundry() {
+  local account_id principal version endpoint
+
+  if ! az cognitiveservices account show -n "$FOUNDRY_ACCOUNT" -g "$RG" >/dev/null 2>&1; then
+    echo "creating AIServices account ${FOUNDRY_ACCOUNT} in ${FOUNDRY_LOCATION}"
+    az cognitiveservices account create -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+      -l "$FOUNDRY_LOCATION" --kind AIServices --sku S0 \
+      --custom-domain "$FOUNDRY_ACCOUNT" --assign-identity --yes -o none
+  fi
+
+  az cognitiveservices account project show -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+    --project-name "$FOUNDRY_PROJECT" >/dev/null 2>&1 || {
+    echo "creating project ${FOUNDRY_PROJECT}"
+    az cognitiveservices account project create -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+      --project-name "$FOUNDRY_PROJECT" -l "$FOUNDRY_LOCATION" -o none
+  }
+
+  if ! az cognitiveservices account deployment show -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+        --deployment-name "$FOUNDRY_DEPLOYMENT" >/dev/null 2>&1; then
+    version="$(az cognitiveservices model list -l "$FOUNDRY_LOCATION" \
+      --query "[?kind=='AIServices' && model.name=='${FOUNDRY_MODEL}'].model.version" \
+      -o tsv | head -1)"
+    [[ -z "$version" ]] && {
+      echo "error: ${FOUNDRY_MODEL} is not available in ${FOUNDRY_LOCATION}" >&2
+      return 1
+    }
+    echo "deploying ${FOUNDRY_MODEL} ${version} as ${FOUNDRY_DEPLOYMENT}"
+    # GlobalStandard is pay-per-token. A provisioned SKU would bill whether or
+    # not the mesh is running, which would end scale-to-zero for the whole demo.
+    az cognitiveservices account deployment create -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+      --deployment-name "$FOUNDRY_DEPLOYMENT" --model-name "$FOUNDRY_MODEL" \
+      --model-version "$version" --model-format OpenAI \
+      --sku-name GlobalStandard --sku-capacity 20 -o none
+  fi
+
+  # The Container App had no identity at all, so DefaultAzureCredential inside
+  # the container had nothing to present.
+  az containerapp identity assign -n "$APP" -g "$RG" --system-assigned -o none
+  principal="$(az containerapp show -n "$APP" -g "$RG" \
+    --query identity.principalId -o tsv)"
+  account_id="$(az cognitiveservices account show -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+    --query id -o tsv)"
+  [[ -z "$principal" || -z "$account_id" ]] && {
+    echo "error: could not resolve the app identity or the Foundry account" >&2
+    return 1
+  }
+
+  # All three, and the last two are the load-bearing ones. "Azure AI Developer"
+  # alone let the identity see the project and still returned 403 from the
+  # inference call; the deployed agent failed every cell while the identical
+  # code passed locally, because the local principal happened to hold all three.
+  # A local pass is not evidence for the deployed identity.
+  local role
+  for role in "Azure AI Developer" "Cognitive Services User" "Cognitive Services OpenAI User"; do
+    az role assignment create --assignee-object-id "$principal" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$role" --scope "$account_id" -o none 2>/dev/null || true
+  done
+
+  endpoint="$(az cognitiveservices account project show -n "$FOUNDRY_ACCOUNT" -g "$RG" \
+    --project-name "$FOUNDRY_PROJECT" \
+    --query "properties.endpoints.\"AI Foundry API\"" -o tsv)"
+  [[ -z "$endpoint" ]] && { echo "error: no project endpoint" >&2; return 1; }
+
+  az containerapp update -n "$APP" -g "$RG" --set-env-vars \
+    "FOUNDRY_PROJECT_ENDPOINT=${endpoint}" \
+    "AZURE_AI_MODEL_DEPLOYMENT_NAME=${FOUNDRY_DEPLOYMENT}" -o none
+
+  echo "foundry wired:"
+  echo "  FOUNDRY_PROJECT_ENDPOINT=${endpoint}"
+  echo "  AZURE_AI_MODEL_DEPLOYMENT_NAME=${FOUNDRY_DEPLOYMENT}"
+  echo "  identity ${principal} -> Azure AI Developer on ${FOUNDRY_ACCOUNT}"
+  echo
+  echo "the agent still serves CURRENCY_MODEL_MODE=direct; switch it with:"
+  echo "  az containerapp update -n ${APP} -g ${RG} --set-env-vars CURRENCY_MODEL_MODE=llm"
 }
 
 verify() {
@@ -281,11 +401,12 @@ destroy() {
 case "${1:-deploy}" in
   deploy) deploy ;;
   fic) fic ;;
+  foundry) foundry ;;
   auth) auth_enforce ;;
   scale) shift; scale "${1:-0}" ;;
   env) env_block ;;
   verify) verify ;;
   url) app_url ;;
   destroy) destroy ;;
-  *) echo "usage: $0 {deploy|fic|auth|scale <n>|env|verify|url|destroy}" >&2; exit 2 ;;
+  *) echo "usage: $0 {deploy|fic|foundry|auth|scale <n>|env|verify|url|destroy}" >&2; exit 2 ;;
 esac

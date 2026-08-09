@@ -48,8 +48,11 @@ runtime_arn() {
   # Seen twice on 2026-08-08. Left unhandled it reads exactly like an expired
   # session, which is the wrong diagnosis and the expensive one: the second
   # occurrence aborted a matrix deploy mid-measurement.
-  local attempt arn
-  for attempt in 1 2 3; do
+  # Backoff rather than a fixed delay: a first attempt at 3x3s failed a wire
+  # step whose very next manual retry, seconds later, succeeded -- so the
+  # outage window is sometimes longer than the whole retry budget was.
+  local attempt arn delay=3
+  for attempt in 1 2 3 4 5; do
     arn="$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
       --query "agentRuntimes[?agentRuntimeName=='${RUNTIME}'].agentRuntimeArn | [0]" \
       --output text 2>/dev/null)" || arn=""
@@ -58,7 +61,7 @@ runtime_arn() {
       echo "$arn"
       return 0
     fi
-    [[ "$attempt" -lt 3 ]] && sleep 3
+    [[ "$attempt" -lt 5 ]] && { sleep "$delay"; delay=$((delay * 2)); }
   done
   return 1
 }

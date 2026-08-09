@@ -19,6 +19,12 @@ class Cell(BaseModel):
     #: that never crossed a vendor boundary and must not be counted toward the
     #: interop claim the way a "cross-cloud" cell can.
     hop: str = "local"
+    #: The brain this *server* reported on /health -- "direct", "llm", or
+    #: "unknown" when it could not be asked. Never the runner's own setting:
+    #: the runner is a different container once deployed, and reading its
+    #: CURRENCY_MODEL_MODE produced a table that said direct while measuring
+    #: three llm agents.
+    server_brain: str = "unknown"
     ok: bool
     #: FailureKind value, or "sdk-missing" when the client SDK is not installed.
     failure_kind: str | None = None
@@ -67,6 +73,31 @@ class MatrixReport(BaseModel):
     def attempted(self) -> list[Cell]:
         """Cells that actually ran, i.e. excluding uninstalled client SDKs."""
         return [cell for cell in self.cells if cell.failure_kind != "sdk-missing"]
+
+    @property
+    def brains(self) -> dict[str, str]:
+        """What each server said its brain was, in column order."""
+        found: dict[str, str] = {}
+        for cell in self.cells:
+            found.setdefault(cell.server, cell.server_brain)
+        return found
+
+    @property
+    def brain_summary(self) -> str:
+        """One honest phrase for the header.
+
+        A single value only when every server agreed and none was unknown --
+        otherwise the per-server breakdown, because a mixed mesh cannot be
+        described by one word and a table that tries is the bug this replaced.
+        """
+        brains = self.brains
+        if not brains:
+            return "unknown"
+        distinct = set(brains.values())
+        if len(distinct) == 1 and "unknown" not in distinct:
+            return distinct.pop()
+        detail = ", ".join(f"{server}={brain}" for server, brain in brains.items())
+        return f"mixed ({detail})"
 
     @property
     def in_cloud_servers(self) -> list[str]:

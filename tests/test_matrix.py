@@ -184,6 +184,117 @@ def test_in_cloud_cells_are_marked_and_excluded_from_the_interop_count():
     assert "azure*" not in table
 
 
+def test_brain_label_comes_from_the_servers_not_the_runner(monkeypatch):
+    """The regression: the runner is a different container once deployed.
+
+    Reading CURRENCY_MODEL_MODE here produced a table that said brain=direct
+    while every agent in it was running a model.
+    """
+    monkeypatch.setenv("CURRENCY_MODEL_MODE", "direct")
+    report = MatrixReport(
+        request_summary="100 USD -> EUR",
+        model_mode="direct",
+        cells=[
+            cell("a2a-sdk", "gcp", True, server_brain="llm"),
+            cell("a2a-sdk", "aws", True, server_brain="llm"),
+            cell("a2a-sdk", "azure", True, server_brain="llm"),
+        ],
+    )
+    assert report.brain_summary == "llm"
+    assert "brain=llm" in render_table(report)
+
+
+def test_a_mixed_mesh_is_not_summarised_as_one_word():
+    report = MatrixReport(
+        request_summary="100 USD -> EUR",
+        model_mode="direct",
+        cells=[
+            cell("a2a-sdk", "gcp", True, server_brain="llm"),
+            cell("a2a-sdk", "aws", True, server_brain="direct"),
+        ],
+    )
+    assert report.brain_summary == "mixed (gcp=llm, aws=direct)"
+
+
+def test_one_unreachable_server_does_not_get_a_confident_label():
+    """'unknown' must not be averaged away into the others' answer."""
+    report = MatrixReport(
+        request_summary="100 USD -> EUR",
+        model_mode="direct",
+        cells=[
+            cell("a2a-sdk", "gcp", True, server_brain="llm"),
+            cell("a2a-sdk", "aws", False, server_brain="unknown"),
+        ],
+    )
+    assert report.brain_summary == "mixed (gcp=llm, aws=unknown)"
+
+
+def test_brain_defaults_to_unknown_rather_than_direct():
+    """A cell nobody asked must not read as a deliberate 'direct'."""
+    assert cell("a2a-sdk", "gcp", True).server_brain == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_server_brain_reads_the_health_endpoint():
+    import httpx
+
+    from matrix import runner as runner_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/health")
+        return httpx.Response(200, json={"status": "ok", "agent": "x", "brain": "llm"})
+
+    original = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original(*args, **kwargs)
+
+    runner_module.httpx.AsyncClient = fake_client
+    try:
+        assert await runner_module.server_brain(GCP_SERVER) == "llm"
+    finally:
+        runner_module.httpx.AsyncClient = original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"status": "ok"},
+        {"status": "ok", "brain": ""},
+        {"status": "ok", "brain": 7},
+    ],
+)
+async def test_a_health_reply_without_a_usable_brain_is_unknown(response):
+    import httpx
+
+    from matrix import runner as runner_module
+
+    original = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(200, json=response)
+        )
+        return original(*args, **kwargs)
+
+    runner_module.httpx.AsyncClient = fake_client
+    try:
+        assert await runner_module.server_brain(GCP_SERVER) == "unknown"
+    finally:
+        runner_module.httpx.AsyncClient = original
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_agent_is_unknown_not_a_crash():
+    """The label must never fail the run: it is a label."""
+    from matrix.runner import server_brain
+
+    unreachable = Server("gcp", "Google Cloud", "adk to_a2a", "http://127.0.0.1:9")
+    assert await server_brain(unreachable, timeout_s=1.0) == "unknown"
+
+
 def test_local_report_says_nothing_about_boundaries():
     """The local matrix reads exactly as it always did -- no footnote, no stars."""
     report = MatrixReport(

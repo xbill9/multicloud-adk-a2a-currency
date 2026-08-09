@@ -371,25 +371,24 @@ Not done:
   is a clock question rather than a network one. What is still untested is a
   *real* aged token from either provider, and genuine clock skew between the
   coordinator's clock and theirs.
-- **`llm` mode now runs on two of three clouds, locally** (2026-08-09): Gemini
-  via ADK over MCP, and Nova via Strands, both returning correctly formatted
-  quotes off the fixture rates. It had never produced an answer anywhere
-  before, and getting there needed code, not credentials — see the three
-  defects in [`docs/INTEROP.md`](docs/INTEROP.md). **Azure cannot run it at
-  all**: `agents/azure/server.py` requires `FOUNDRY_PROJECT_ENDPOINT` and
-  `AZURE_AI_MODEL_DEPLOYMENT_NAME`, and there is no AI Foundry project or model
-  deployment in the subscription — `az cognitiveservices account list` is empty
-  subscription-wide. Creating one is new billable infrastructure, so it is a
-  decision rather than a step.
-- **No `llm`-mode run is deployed or measured.** Both working clouds were
-  exercised on a laptop against their real models; nothing has been rebuilt or
-  redeployed, and `Dockerfile.aws` still omits `strands-agents` deliberately,
-  so the hosted AWS agent cannot serve `llm` mode as built. Every hosted number
-  in this README remains direct-brain.
-- **The matrix's `brain=` label reads the wrong environment.**
-  `matrix/runner.py:153` takes `CURRENCY_MODEL_MODE` from the *runner's* env,
-  but the brain lives in each agent — different containers once hosted. A run
-  against three `llm` agents printed `brain=direct`. The label is unreliable
-  and should come off the agent card instead; not yet fixed.
+- **`llm` mode runs on all three clouds** (2026-08-09), having never produced
+  an answer anywhere before. Gemini via ADK over MCP and Nova via Strands run
+  locally; **Azure runs a model in production** — gpt-5-mini on AI Foundry,
+  deployed via `./infra/deploy_azure.sh foundry` and passing 3/3 of its hosted
+  matrix cells. Getting there needed code and infrastructure, not credentials:
+  six defects, all in [`docs/INTEROP.md`](docs/INTEROP.md).
+- **Only Azure's `llm` mode is deployed.** GCP and AWS were exercised on a
+  laptop against their real models; neither has been rebuilt, and
+  `Dockerfile.aws` still omits `strands-agents`, so the hosted AWS agent cannot
+  serve `llm` mode as built. Every other hosted number here is direct-brain,
+  and the mesh is now deliberately mixed — which the `brain=` label reports.
+- ~~**The matrix's `brain=` label reads the wrong environment.**~~ Fixed
+  2026-08-09. Every agent reports its own brain on `/health`, and the matrix
+  asks each server rather than reading its own `CURRENCY_MODEL_MODE`. A mixed
+  mesh is reported as one: `brain=mixed (gcp=direct, aws=unknown, azure=llm)`.
+  The probe carries the peer's credential, because `/health` sits behind the
+  same privileged ingress as everything else. **AWS reads `unknown`** — its
+  endpoint ends in `/invocations/`, so there is no `/health` to fetch — and
+  saying so beats the confidently wrong value it replaced.
 - No token or cost accounting. Warm/cold is now labelled everywhere it is
   recorded, but only the consensus run has more than one sample behind it.

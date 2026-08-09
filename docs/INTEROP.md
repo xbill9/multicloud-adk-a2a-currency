@@ -361,6 +361,64 @@ None of this is deployed. `Dockerfile.aws` still omits `strands-agents`
 deliberately, so the hosted AWS agent cannot serve `llm` mode as built, and no
 hosted `llm` measurement exists.
 
+## Azure `llm` mode, deployed (2026-08-09)
+
+The third cloud now serves a real model in production. 8/9 hosted, the red cell
+still finding 2:
+
+```console
+A2A interop matrix  (100 USD -> EUR, GBP, brain=mixed (gcp=direct, aws=unknown, azure=llm))
+
+client \ server  gcp*              aws               azure
+a2a-sdk          ok 572ms          ok 921ms          ok 13068ms
+agent-framework  ok 394ms          ok 5717ms         ok 6740ms
+google-adk       transport         ok 922ms          ok 8177ms
+
+8/9 attempted cells succeeded
+```
+
+Azure's column is 6.7–13.1s because it is the only one running a model, and a
+reasoning model at that, called across regions. It is not comparable to the
+other two columns and the `brain=` label now says so rather than leaving the
+reader to know it.
+
+Three things this cost that a local pass did not predict:
+
+- **`Azure AI Developer` is not enough.** It lets the identity see the project
+  and still returns **403** from inference. `Cognitive Services User` and
+  `Cognitive Services OpenAI User` are the load-bearing ones. The local test
+  passed because that principal happened to hold all three — a local pass is
+  not evidence about the deployed identity, which is a different principal
+  with different grants.
+- **The role grant does not take effect until the revision restarts.** The
+  container holds a managed-identity token minted before the assignment, so
+  every cell kept failing 403 after the grant looked correct. `az containerapp
+  revision restart` fixed it with no other change.
+- **The Container App had no identity at all** (`identity: None`), so
+  `DefaultAzureCredential()` had nothing to present in the first place.
+
+Region and model are forced, not preferred. `FoundryChatClient` speaks the
+OpenAI **Responses** API, and westus2 — where the Container App lives — offers
+no Azure OpenAI models, only open-weight and partner ones. westus3 is the
+nearest region that has them, hence the cross-region hop. And the model must be
+a *reasoning* model: `agents/azure/server.py` passes `store=False`, so
+agent-framework requests `reasoning.encrypted_content` to avoid server-side
+storage, and `gpt-4.1-mini` rejects that with "Encrypted content is not
+supported with this model". `gpt-5-mini` accepts it. Keeping `store=False` was
+judged worth the latency.
+
+`infra/deploy_azure.sh foundry` does all of it idempotently. `Dockerfile.azure`
+now installs `agent-framework-foundry` and `azure-identity`, which are separate
+distributions from `agent-framework-core` — without them the deployed agent
+accepted `CURRENCY_MODEL_MODE=llm` and then failed on import, exactly the way
+`Dockerfile.aws` still does.
+
+**AWS reads `unknown` and that is honest.** The brain probe GETs `/health` on
+the server's endpoint, and AgentCore's endpoint ends in `/invocations/`, so
+there is no such path to fetch. Rather than guess, the label says it does not
+know — which is the whole point of replacing a value that was confidently
+wrong.
+
 ## What is deliberately not claimed
 
 - Latencies in the nine-cell matrix are local and direct-brain. They measure

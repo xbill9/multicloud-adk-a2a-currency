@@ -19,7 +19,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agents.common import DESCRIPTION, INSTRUCTION, deterministic_reply
+from agents.common import DESCRIPTION, INSTRUCTION, deterministic_reply, model_mode
 
 Responder = Callable[[str], Awaitable[str]]
 
@@ -79,7 +79,11 @@ def build_app(executor: AgentExecutor, card: AgentCard) -> Starlette:
     )
 
     async def health(request):
-        return JSONResponse({"status": "ok", "agent": card.name})
+        # `brain` is reported by the agent because only the agent knows it.
+        # The matrix used to print CURRENCY_MODEL_MODE from its *own* process,
+        # which is a different container once deployed -- a run against three
+        # `llm` agents duly printed brain=direct.
+        return JSONResponse({"status": "ok", "agent": card.name, "brain": model_mode()})
 
     async def ping(request):
         """AgentCore Runtime's health contract.
