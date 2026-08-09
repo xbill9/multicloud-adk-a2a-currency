@@ -99,13 +99,16 @@ build_and_push() {
 
 deploy() {
   ensure_infra
-  local image url pw
+  local image url principal acr_id
   image="$(build_and_push)"
-  pw="$(az acr credential show -n "$ACR" --query 'passwords[0].value' -o tsv)"
 
   if az containerapp show -n "$APP" -g "$RG" -o none 2>/dev/null; then
     az containerapp update -n "$APP" -g "$RG" --image "$image" -o none
   else
+    # Created with the ACR admin password because the app has no identity yet;
+    # `registry_identity` below replaces it with managed-identity pull and
+    # deletes the stored secret. See the comment there for why that matters.
+    local pw; pw="$(az acr credential show -n "$ACR" --query 'passwords[0].value' -o tsv)"
     az containerapp create -n "$APP" -g "$RG" \
       --environment "$ENVIRONMENT" \
       --image "$image" \
@@ -122,10 +125,44 @@ deploy() {
   az containerapp update -n "$APP" -g "$RG" \
     --set-env-vars "PUBLIC_URL=${url}" "CURRENCY_MODEL_MODE=${MODEL_MODE}" HOST=0.0.0.0 PORT=8080 -o none
 
+  registry_identity
+
   echo
   echo "container app : $url"
   echo
   echo "Next: ./infra/deploy_azure.sh fic"
+}
+
+# Pull the image with the app's managed identity instead of the ACR admin
+# password, and delete the stored secret.
+#
+# This is the last long-lived credential in the running system. It is not on any
+# agent-to-agent path -- it only pulls the image -- but "no stored secrets" is a
+# claim about the deployed system, and a registry password sitting in the app's
+# configuration falsifies it as stated. Container Apps supports identity-based
+# pull, so the honest fix was available and cheap.
+registry_identity() {
+  local principal acr_id
+  az containerapp identity assign -n "$APP" -g "$RG" --system-assigned -o none
+  principal="$(az containerapp show -n "$APP" -g "$RG" --query identity.principalId -o tsv)"
+  acr_id="$(az acr show -n "$ACR" -g "$RG" --query id -o tsv)"
+  [[ -z "$principal" || -z "$acr_id" ]] && {
+    echo "warning: could not resolve identity or ACR; leaving password auth in place" >&2
+    return 0
+  }
+
+  az role assignment create --assignee-object-id "$principal" \
+    --assignee-principal-type ServicePrincipal \
+    --role AcrPull --scope "$acr_id" -o none 2>/dev/null || true
+
+  az containerapp registry set -n "$APP" -g "$RG" \
+    --server "${ACR}.azurecr.io" --identity system -o none
+
+  # Orphaned once the registry no longer references it.
+  az containerapp secret remove -n "$APP" -g "$RG" \
+    --secret-names "$(echo "${ACR}.azurecr.io-${ACR}" | tr -d '.')" -o none 2>/dev/null || true
+
+  echo "image pull now uses the app's managed identity; ACR secret removed"
 }
 
 # The Entra half. An app registration whose Federated Identity Credential

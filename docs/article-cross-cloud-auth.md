@@ -150,6 +150,17 @@ keeping a second copy. A redeployed AgentCore runtime has a new ARN, and its
 invocation URL contains that ARN, so any copy of it elsewhere is stale the
 moment it is written down.
 
+There is a sharper reason than tidiness, and I demonstrated it on myself. I
+changed one environment variable on the AgentCore runtime with a direct API
+call rather than through the script. The update API replaces configuration
+rather than merging it, so the `serverProtocol=A2A` setting the script always
+passes was silently dropped. The runtime stayed `READY`, its health check
+passed, and every A2A request to it returned `400` on the agent card — a
+failure that says nothing about the field that was lost. The script sets that
+field on every call precisely so it cannot go missing. Once a runtime's
+configuration is only correct when all of it is written at once, a partial
+update from outside the script is a live hazard, not a shortcut.
+
 **Separate "deployed" from "wired".** Deploying one cloud gives a one-cloud
 mesh. Wiring is the step that makes it three, and it depends on the other clouds
 already existing. Keeping them as separate verbs makes the dependency explicit
@@ -226,6 +237,22 @@ not measurements of a population.
 The mesh is keyless in operation, not in bootstrap: creating trust policies, app
 registrations and federated credentials used ordinary operator credentials, as
 provisioning always does. The claim is about the running system.
+
+That claim is worth stating precisely, because checking it turned up a
+credential I had not counted. The three A2A legs were always keyless, but the
+Azure app pulled its container image using the registry's admin password, held
+as a secret in the app's own configuration. It was not on any agent-to-agent
+path, and it would still have made "no stored secrets" false as written.
+Container Apps supports pulling by managed identity, so the fix was to grant
+the app's identity `AcrPull` and delete the secret. An audit of all three
+deployments now shows no stored credential in any of them: the AWS runtime's
+environment holds five plain values, the Cloud Run service and job reference no
+secrets, and the Container App's secret list is empty with its registry set to
+identity-based pull.
+
+The general point is duller than the fix: image pull is part of the deployed
+system, and a claim about secrets has to cover the whole of it rather than the
+interesting part.
 
 Token expiry and refresh are implemented and covered by tests, but no token has
 expired in production — every run is a job that lives a few seconds, so the

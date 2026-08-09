@@ -211,6 +211,43 @@ The deployed 3×3 matrix is in [`INTEROP.md`](INTEROP.md#the-same-matrix-deploye
 **8/9**, the single red cell being finding 2, still ADK's own client against
 ADK's own server.
 
+## Full revalidation before publication (2026-08-09)
+
+Everything re-run end to end against the deployed mesh, after the `llm` work
+and the return to `direct`.
+
+| Check | Result |
+|---|---|
+| Three-cloud consensus, 3 runs | `3/3 clouds, agreed` each time |
+| Warm elapsed vs slowest leg | +729ms, +843ms (cold Azure run: +898ms) |
+| Unauthenticated `curl`, `/health` and card | **403** both |
+| Each leg alone, as deployed | answered (3/3) |
+| Each leg alone, credential removed | denied (3/3) |
+| Right identity, wrong audience | denied |
+| Hosted matrix | 8/9, 6 cross-cloud + 2 in-cloud, one red cell = finding 2 |
+| Stored credentials, all three clouds | none (see below) |
+| Suite / lint | 96 passed, 11 skipped / clean |
+
+**Two defects found by revalidating, both mine, both from working outside the
+scripts.**
+
+*The AWS leg was returning 400 on every agent-card fetch.* Setting
+`CURRENCY_MODEL_MODE` back to `direct` with a direct `update-agent-runtime`
+call replaced the runtime's configuration rather than merging into it, dropping
+`protocolConfiguration: serverProtocol=A2A`, which the deploy script passes on
+every call. The runtime stayed `READY` and its health check passed while no A2A
+request could succeed. Restored, verified, and a reason to route every change
+through the script.
+
+*The Azure app held a stored secret.* Image pull used the ACR admin password,
+kept as a secret in the app's own configuration. Not on any agent-to-agent
+path, but enough to falsify "no stored secrets" as written. Now pulls with the
+app's managed identity (`AcrPull` on the registry) and the secret is deleted;
+`deploy_azure.sh` does this as part of `deploy`. Audited afterwards: the AWS
+runtime environment holds five plain values, the Cloud Run service and job
+reference no secrets, the Container App's secret list is empty, and there is no
+key vault in the resource group.
+
 ## What the controls actually proved (2026-08-07)
 
 `./infra/deploy_gcp.sh verify`. Every probe runs one leg alone — the mesh
