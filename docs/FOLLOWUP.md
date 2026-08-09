@@ -135,9 +135,9 @@ default.
 
 ## Framing changes, which cost nothing
 
-**Publish a defect taxonomy and claim only the top tiers.** Of the nine defects
-found by deploying, roughly two are protocol or platform defects and the rest
-are packaging and configuration — missing `strands-agents`, missing
+**Publish a defect taxonomy and claim only the top tiers.** Of the defects found
+by deploying, one is a protocol/discovery defect, one is platform-mediated, and
+the rest are packaging and configuration — missing `strands-agents`, missing
 `agent-framework-foundry`, missing `bedrock:InvokeModel`, `mcp` 2.0, blank env
 vars, a `--cloud` flag left behind. Presented with equal weight, they invite a
 reviewer to notice most are `pip install` problems and discount the entire set.

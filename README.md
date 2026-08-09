@@ -24,6 +24,22 @@ Run, so **the GCP leg is an in-cloud hop, not a cross-cloud one**. Two of the
 three legs cross a vendor boundary; the third is Cloud Run reaching Cloud Run,
 and the matrix now marks it rather than letting it pad the score.
 
+**Prior art.** A search on 2026-08-09 for cross-vendor A2A interop testing found
+none. The closest work is adjacent: the official
+[`a2a-tck`](https://github.com/a2aproject/a2a-tck) validates a single
+implementation against the *spec*, locally;
+[`a2a-inspector`](https://github.com/a2aproject/a2a-inspector) validates one
+agent; and [A2A issue #1755](https://github.com/a2aproject/A2A/issues/1755)
+measured 50 agents advertising A2A, of which 100% advertised and 0% answered a
+correct `tasks/send` — reachability at breadth, not interop at depth. The A2A
+roadmap lists expanded testing as planned. The nearest actual prior art is this
+author's own [six-edge predecessor
+series](https://github.com/xbill9/cross-cloud-a2a-rollup), which covered
+protocol versions, dependency extras, identity federation, header forwarding
+and URL shapes across three clouds pairwise. This is a basic search, not a
+systematic review, so read it as *no cross-vendor interop matrix was found*
+rather than none exists.
+
 See [`docs/INTEROP.md`](docs/INTEROP.md) and
 [`docs/DEPLOYMENT_PLAN.md`](docs/DEPLOYMENT_PLAN.md).
 [`docs/FOLLOWUP.md`](docs/FOLLOWUP.md) is the critical read: what this project
@@ -38,7 +54,7 @@ One command, four acts — the last two are the point:
 $ ./infra/demo.sh
 
 1. Three clouds, one question       three vendors' frameworks, one answer
-2. The interop matrix               3 client SDKs x 3 serving stacks
+2. The interop matrix               3 client SDKs x 3 hosted agents
 3. A cloud goes offline             the median degrades instead of failing
 4. A cloud lies                     the median holds; the outlier is named
 ```
@@ -111,7 +127,9 @@ google-adk       transport         ok 5953ms         ok 471ms
 Six of the eight passing cells crossed a vendor boundary. The other two are
 Cloud Run reaching Cloud Run, and no longer count toward the interop claim.
 
-Three client SDKs × three natively-served agents. Every cell is one real A2A
+Three client SDKs × three natively-served agents — though see **How
+independent the axes actually are** under Architecture before reading that as
+nine independent experiments. Every cell is one real A2A
 call; a failed cell records which layer broke (`transport`, `protocol`,
 `timeout`, `authentication`, `provider`) rather than just failing — the
 classification walks the vendor SDK's exception chain, because every stack here
@@ -161,15 +179,34 @@ degrade the quorum instead of failing the run.
   us-central1      us-west-2         westus2
 ```
 
+The model row applies to `llm` mode only. The default is `direct`, where no
+model is in the path at all and each agent answers from a rate provider — so
+every measurement in this README other than the `llm` run is measuring vendor
+*serving* stacks and the protocol, not vendor models.
+
 Each credential is minted from the coordinator's own workload identity: a
 Google ID token for Cloud Run, an STS `AssumeRoleWithWebIdentity` exchange into
 SigV4 for AgentCore, and an Entra Federated Identity Credential exchange for
 Container Apps. Three clouds, three mechanisms, **no stored secret** — the
 coordinator's host is the only thing that makes that possible.
 
-The three serving stacks are genuinely different code paths — that is what the
-matrix measures. The client side is symmetric: any of the three client SDKs can
-drive the whole mesh (`--client agent-framework`).
+**How independent the axes actually are**, because the grid overstates it and
+the overstatement is easy to check:
+
+- **Servers: two stacks, not three.** `agents/aws/server.py` and
+  `agents/azure/server.py` both build on `agents/serving.py` — same Starlette
+  app, same `a2a-sdk` routes, same card builder — differing only in executor.
+  Only the GCP leg, on ADK's `to_a2a()`, is a separate serving stack.
+- **Clients: one transport, three façades.** `agent-framework-a2a` requires
+  `a2a-sdk>=1.0.0,<2` and `google-adk` requires `a2a-sdk>=0.3.4,<2`. All three
+  client stacks resolve to the same wire implementation.
+
+So nine cells is a presentation, not nine independent experiments. That makes
+the failures more interesting rather than less: shared implementation on both
+ends should make interop trivial, and it did not — a platform still stripped a
+protocol header and a framework still advertised an unreachable address. The
+client side is symmetric in the sense that matters operationally: any of the
+three can drive the whole mesh (`--client agent-framework`).
 
 | Layer | Module |
 |---|---|
@@ -245,7 +282,10 @@ python3 -m coordinator.cli 100 USD EUR GBP
 ## Deployed
 
 All three agents also run on their own vendor's hosting, reached from one
-coordinator with **no long-lived secret anywhere in the mesh**. Deploy each
+coordinator with **no long-lived secret anywhere in the mesh** — a claim about
+the running system, not about bootstrap: creating the trust policy, the app
+registration and the federated credential used the operator's own credentials,
+as provisioning always does. Deploy each
 cloud with its own script, then wire the coordinator to all three:
 
 Every AWS verb preflights its credentials first: if the ambient ones do not
@@ -282,7 +322,7 @@ Tests are hermetic by default; the live suite skips itself unless the mesh is
 up.
 
 ```bash
-python3 -m pytest tests/ -q     # 85 passed, 11 skipped
+python3 -m pytest tests/ -q     # 96 passed, 11 skipped
 ```
 
 ## Status
@@ -295,7 +335,7 @@ Done and verified:
 - Three client stacks behind one interface, sharing one parser.
 - The full 3×3 matrix passing locally, with two real interop defects found,
   diagnosed, and documented.
-- 96 tests, including all nine cells as assertions and a
+- 107 tests, including all nine cells as assertions and a
   cloud-goes-offline degradation case.
 - One credential seam for all three legs (`coordinator/auth.py`): Google ID
   token, STS `AssumeRoleWithWebIdentity` → SigV4, and Entra federated exchange
@@ -350,7 +390,7 @@ Not done:
 - **Roughly 32 tests are gone.** The 2026-08-02 session left 92 passing; this
   repo has 60, because that work was recovered from a Cloud Build tarball and
   `.gcloudignore` excludes `tests/`. What they covered is unknown. The
-  surviving 71 (60 + 11 skipped) passed; the suite is now 96 (85 + 11)
+  surviving 71 (60 + 11 skipped) passed; the suite is now 107 (96 + 11)
   after the in-cloud-hop and token-lifecycle work added twenty-five.
 - **Nothing outstanding on AWS scoping** — this one moved to the done list:
   the deployed policy is scoped to one runtime ARN, `Resource: "*"` is not
@@ -384,13 +424,13 @@ Not done:
 - **`llm` mode runs on all three clouds, deployed** (2026-08-09), having never
   produced an answer anywhere before. A hosted 8/9 with `brain=llm`: Gemini via
   ADK over MCP on Cloud Run, Nova via Strands on AgentCore, gpt-5-mini via
-  Agent Framework on Container Apps. Nova is the fastest brain at 2.1–2.5s;
-  Gemini and gpt-5-mini run 4.4–12.3s. Getting there needed code and
-  infrastructure rather than credentials — nine defects, all written up in
-  [`docs/INTEROP.md`](docs/INTEROP.md), of which the one worth reading is that
-  **AgentCore silently drops the `A2A-Version` header**, so `a2a-sdk` assumes
-  0.3 and rejects a request its own handler cannot serve. Two clouds forward
-  it; the third does not.
+  Agent Framework on Container Apps. Nova was fastest at 2.1–2.5s against
+  4.4–12.3s for the other two — but they are different model classes in
+  different regions on one run each, so that ordering is an observation, not a
+  benchmark. Most of what it took to get there was packaging and configuration;
+  see [`docs/INTEROP.md`](docs/INTEROP.md), and note that **AgentCore drops the
+  `A2A-Version` header** while the other two forward it — a mechanism the
+  predecessor series had already identified, reproduced here with controls.
 - **`llm` numbers are one run each.** The all-three-`llm` matrix has a single
   execution behind it, unlike the direct-brain figures, which have five. Model
   latency is also far noisier than protocol latency, so those cells order the

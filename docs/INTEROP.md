@@ -6,6 +6,10 @@ reading specifications. Run `python -m matrix.runner` to reproduce.
 ## The matrix
 
 Nine directed calls: three client SDKs against three natively-served agents.
+The axes are less independent than that reads — two of the three servers share
+`agents/serving.py`, and all three clients resolve to the same `a2a-sdk`
+underneath. See "How independent the axes are" in the README before quoting
+nine as nine experiments.
 Latencies are local, direct-brain (no model), and measure protocol overhead
 only — single runs on one machine, 2026-08-07. They order the stacks and
 nothing more; earlier revisions of this table recorded 69/31/864ms for the
@@ -444,7 +448,15 @@ gpt-5-mini is a reasoning model called across regions.
 
 ### AgentCore drops the `A2A-Version` header
 
-The find of the day, and it only appears in a mesh. `a2a-sdk` reads the
+**A confirmation, not a discovery** — and worth stating in that order, because
+the mechanism was already known. The predecessor series identified a proxy
+silently stripping this header, including the detail that a *missing* header
+then reads as an old client; it was written into `docs/ARTICLE_PLAN.md` before
+this mesh existed. What is new here is narrower: it reproduced on **AgentCore
+specifically**, with two control clouds forwarding the same header untouched,
+and it now has a fix. That is a good result and not a first sighting.
+
+The mechanism, for the record. `a2a-sdk` reads the
 protocol version from an `A2A-Version` request header and, when it is
 **absent**, assumes `0.3` and rejects the request its own handler cannot
 serve:
