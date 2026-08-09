@@ -1,10 +1,10 @@
 # Deployment plan
 
-Current state: three native agents, a 3×3 interop matrix passing 9/9, N-way
-median consensus, 45 tests — and **nothing deployed**. Everything measured so
-far is local with `direct` brains.
-
-Work in this order. Each step's output is what makes the next step meaningful.
+Written when nothing was deployed, and kept in that order because each step's
+output is what made the next one meaningful. **All three legs are now deployed
+and revalidated end to end** — see "Full revalidation before publication" below
+for the current state; the sections above it are the plan as it was executed,
+with outcomes recorded against each step.
 
 ## 1. Decide hosting, because it decides the auth bill
 
@@ -131,9 +131,9 @@ Cloud Run container; this is well inside that. Note this is an **in-cloud hop**
 — both ends are GCP — so it belongs in the matrix labelled as such and must not
 pad the interop claim. The runner now does it: `CURRENCY_COORDINATOR_CLOUD=gcp`
 is set on both jobs by `deploy_gcp.sh`, and the marker counts the cross-cloud
-cells separately rather than reporting a bare 9/9. Verified against the local
-mesh with the variable set; **the jobs have not been redeployed or re-run since
-the change**, so no hosted table has yet been printed with the marker on it.
+cells separately rather than reporting a bare 9/9. Confirmed hosted since
+2026-08-08: the deployed matrix prints `gcp*` and reports 6 cross-cloud cells
+against 2 in-cloud ones.
 
 **Two defects, neither catchable locally**, both found within minutes of the
 first authenticated call by code with a green 69-test suite: a 401 misfiled as
