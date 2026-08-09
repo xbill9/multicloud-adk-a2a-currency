@@ -51,9 +51,18 @@ def _direct_agent():
 
 def _llm_agent():
     """Native brain: Gemini with the exchange rate reached over MCP."""
-    from google.adk.agents import LlmAgent
-    from google.adk.tools.mcp_tool import McpToolset, StreamableHTTPConnectionParams
+    import sys
 
+    from google.adk.agents import LlmAgent
+    from google.adk.tools.mcp_tool import McpToolset, StdioConnectionParams
+    from mcp import StdioServerParameters
+
+    # Stdio, not Streamable HTTP. `mcp_server/server.py` is a stdio JSON-RPC
+    # server and always has been -- there is no HTTP MCP server anywhere in
+    # this repo, so StreamableHTTPConnectionParams pointed at a port nothing
+    # ever listened on. ADK's graceful tool-error handling downgraded that to
+    # a WARNING, so the agent started, answered /health with 200, and served
+    # `llm` mode with zero tools registered.
     return LlmAgent(
         model=os.getenv("GENAI_MODEL", "gemini-2.5-flash"),
         name=AGENT_NAME,
@@ -61,8 +70,11 @@ def _llm_agent():
         instruction=INSTRUCTION,
         tools=[
             McpToolset(
-                connection_params=StreamableHTTPConnectionParams(
-                    url=os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8081/mcp")
+                connection_params=StdioConnectionParams(
+                    server_params=StdioServerParameters(
+                        command=sys.executable,
+                        args=["-m", "mcp_server.server"],
+                    ),
                 ),
             ),
         ],

@@ -43,6 +43,21 @@ Re-run with Azure held warm at `minReplicas: 1`, same 8/9:
 | `agent-framework` | ok 490ms | ok 5678ms | ok 414ms |
 | `google-adk` | **transport** | ok 864ms | ok 637ms |
 
+### Five warm runs, 2026-08-08 — now with a distribution
+
+Everything above is a single execution per cell. Five consecutive warm runs,
+all 8/9, min–max across the five (the `gcp` column is marked because the
+coordinator runs there; see the in-cloud-hop note below):
+
+| client \ server | GCP* `us-central1` | AWS `us-west-2` | Azure `westus2` |
+|---|---|---|---|
+| `a2a-sdk` | ok 928–1139ms | ok 989–1328ms | ok 441–538ms |
+| `agent-framework` | ok 399–504ms | ok 851–1033ms | ok 370–570ms |
+| `google-adk` | **transport** ×5 | ok 5926–6037ms | ok 432–531ms |
+
+Cold is a different regime and is not mixed in: a cold Azure leg measured
+23378ms in the same session's consensus run, against 441–570ms warm here.
+
 **8/9. The one red cell is finding 2, and it is still ADK's own client against
 ADK's own server.** That is the same failure the single-column deployed run
 found on 2026-07-31, now reproduced with the other two clouds beside it as
@@ -60,15 +75,52 @@ Read the latencies with care, and preferably not at all:
 - **Warming Azure moves its column from ~24s cold to 414–2070ms** and changes
   nothing else. That is the whole of the Azure "slowness" seen in earlier
   tables: `minReplicas`, not Container Apps.
-- **`agent-framework` → AWS is reproducibly ~5.7s** — 5700ms, then 5678ms an
-  hour later — while the other two clients reach the same runtime in ~1s in the
-  same run. It is not a cold start: it comes *after* a warm cell in its own
-  column, and `google-adk` fell from 5913ms to 864ms between runs while this
-  cell did not move. Something in that client/AgentCore pairing costs a fixed
-  ~4.5s. Unexplained, and flagged rather than smoothed over.
-- These are single runs per cell. There is still no distribution behind any
-  individual number, which is why this table should not be quoted as a
-  comparison between clouds.
+- ~~**`agent-framework` → AWS is reproducibly ~5.7s.**~~ **Withdrawn
+  2026-08-08 — it was never about the client.** See below.
+- These were single runs per cell. The five-run table above now has a
+  distribution behind it; the two tables above that do not.
+
+### The ~5.7s AWS cell was an AgentCore session cold start
+
+The claim above said "something in that client/AgentCore pairing costs a fixed
+~4.5s". That was wrong, and the shape of the evidence should have given it
+away: across the two runs the slow cell **moved** — `agent-framework` in one,
+`google-adk` in the other, both in a third. A fixed per-client cost does not
+move. Something per-*call* does.
+
+`coordinator/auth.py:741` mints the AgentCore session header as
+`os.getenv("AWS_A2A_SESSION_ID") or str(uuid.uuid4())`, and `credentials_for()`
+runs once per cell. So each of the three AWS cells opened a **different**
+AgentCore session, and AgentCore gives each session its own microVM. The ~5.9s
+is that microVM starting. It lands on whichever cell draws cold capacity, which
+is why it wandered between clients.
+
+Pinning one session id across all three cells removes it, and releasing the pin
+brings it straight back. The two conditions were interleaved in time, so this
+is not warming drift:
+
+| `google-adk` → AWS | runs | measured |
+|---|---|---|
+| fresh UUID per cell (default) | 5 | 5953, 5970, 5926, 5984, 6037ms |
+| `AWS_A2A_SESSION_ID` pinned | 2 | 710, 704ms |
+
+The whole AWS column drops with the pin — `a2a-sdk` 815–1147ms,
+`agent-framework` 621–622ms — because none of the three cells is paying for a
+new microVM any more.
+
+Two things follow. **The matrix's AWS column was measuring session cold starts,
+not client stacks**, and any comparison drawn from it between the three clients
+was reading noise. And **the mesh pays this in production too**: every
+`credentials_for()` call mints a fresh session, so a consensus run opens a new
+AgentCore session each time. Those runs measured 1073–1207ms on the AWS leg, so
+they usually draw warm capacity — but nothing guarantees it, and a ~6s leg
+would silently become the `max(legs)` that sets the whole run's elapsed time.
+Set `AWS_A2A_SESSION_ID` to make the leg predictable; leave it unset only if
+you actually want per-call session isolation.
+
+What is *not* established: why cold capacity falls to one cell rather than
+another, or how many warm sessions AgentCore keeps. Only the cause of the
+latency is proven here, not the scheduler's policy.
 
 The predecessor series' prediction holds in shape: 0.4–1.5s to warm containers,
 and nothing here approaches the 18.8–25.1s it measured against hosted *model*
@@ -233,6 +285,81 @@ and there is always one result envelope per requested target whether or not
 anything filled it. Harmless while it only drove a CLI exit code on a laptop.
 Wrong the moment a Cloud Run job's exit status became the health signal: the
 run where every participant 401'd reported green.
+
+**A whole cloud wired in as an empty string (2026-08-08).** An expired AWS
+session made `deploy_aws.sh env` emit `AWS_A2A_ENDPOINT=` and
+`AWS_A2A_ROLE_ARN=` — and exit **0**. `deploy_gcp.sh wire` accepted them and
+pushed both blanks into the live coordinator job, reporting success.
+
+The mechanism is worth stating exactly, because it is invisible on inspection.
+`env_block()` built the block as a heredoc with `$(runtime_url)` inline. A
+command substitution is a subshell, so `runtime_url`'s `exit 1` terminated only
+that subshell; `set -euo pipefail` never saw a failure, the heredoc printed the
+name with nothing after the `=`, and the function returned 0. The guard in
+`peer_env()` then checked that *some* assignment came back — which one had —
+rather than that it had a value.
+
+Three layers of silent success stacked over one absent cloud: the AWS script,
+the wire step, and then the mesh itself, whose median absorbs a dead leg and
+exits 0 by design. That last one is correct behaviour at runtime and exactly
+wrong at deploy time, which is the distinction the fix draws.
+
+Both ends now refuse. `env_block()` resolves into variables, validates them,
+and returns non-zero; `peer_env()` rejects any empty-valued assignment, no
+longer swallows the sibling's stderr (the explanation was being discarded), and
+offers `ALLOW_PARTIAL_MESH=1` for the case where two clouds really is what you
+want. `runtime_url()`'s message named only "runtime not deployed", which sent
+this session hunting for a deleted runtime that was in fact `READY`; it now
+names both causes and how to tell them apart.
+
+This is the project's thesis a third time. No local test could have produced
+it: it needs a real expired credential, a real sibling script, and a real
+deployment target.
+
+## `llm` mode had never run, and three defects explain why (2026-08-09)
+
+All found on a laptop, before spending anything on a cloud. The pattern is the
+one this document keeps recording: each failure reported success somewhere.
+
+**GCP could not have worked.** `_llm_agent()` connected with
+`StreamableHTTPConnectionParams` to `http://127.0.0.1:8081/mcp`, but
+`mcp_server/server.py` is a stdio JSON-RPC server and there is no HTTP MCP
+server anywhere in this repo. Nothing has ever listened on that port.
+
+**And it failed as a warning.** ADK's `_MCP_GRACEFUL_ERROR_HANDLING` downgrades
+`Failed to create MCP session: All connection attempts failed` to a `WARNING`,
+so the agent started, answered `/health` with **200**, and served `llm` mode
+with zero tools registered. An agent advertising a brain it does not have.
+
+**The prompt named a tool that did not exist.** The shared `INSTRUCTION` in
+`agents/common.py` says to use `get_exchange_rate`, which is exactly what the
+AWS and Azure agents register natively. The MCP server offered only
+`convert_currency`, with a different signature. Gemini emitted
+`get_exchange_rate(...)` as instructed and ADK rejected it as
+`UNEXPECTED_TOOL_CALL` — the prompt and the tool contract disagreeing, with
+nothing in either component able to see the other.
+
+Fixed by pointing GCP at `StdioConnectionParams` running
+`python -m mcp_server.server` (the transport that exists, keeping the leg
+genuinely "over MCP"), and by adding `get_exchange_rate(currency_from,
+currency_to)` to the MCP server beside `convert_currency` — which stays,
+because `coordinator/mcp_stdio.py` calls it by name.
+
+| cloud | brain | result |
+|---|---|---|
+| GCP | Gemini via ADK + MCP | `0.92` EUR, `150.0` JPY, no MCP warnings |
+| AWS | Nova via Strands | `0.92` EUR, `0.79` GBP, 1839ms |
+| Azure | Foundry | **cannot run** — no Foundry project exists |
+
+Also worth recording: ADK does not use application-default credentials for
+Gemini. It wants `GOOGLE_GENAI_USE_VERTEXAI=true` with
+`GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION`, or an API key; with neither it
+returns "No API key was provided" **inside a task body with HTTP 200**, which
+is its own instance of the pattern above.
+
+None of this is deployed. `Dockerfile.aws` still omits `strands-agents`
+deliberately, so the hosted AWS agent cannot serve `llm` mode as built, and no
+hosted `llm` measurement exists.
 
 ## What is deliberately not claimed
 

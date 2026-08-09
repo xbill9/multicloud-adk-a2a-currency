@@ -40,9 +40,27 @@ MASTER_SA="${COORDINATOR_SA:-currency-coordinator@${GCP_PROJECT}.iam.gserviceacc
 account_id() { aws sts get-caller-identity --query Account --output text; }
 
 runtime_arn() {
-  aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
-    --query "agentRuntimes[?agentRuntimeName=='${RUNTIME}'].agentRuntimeArn | [0]" \
-    --output text
+  # Retried because bedrock-agentcore-control intermittently fails this call
+  # with `ValidationException ... CreateOAuth2Token ... the provided
+  # authorization grant is invalid, expired, revoked, or malformed` on a
+  # session that is demonstrably valid -- `aws sts get-caller-identity`
+  # succeeds either side of it, and the very next attempt returns the ARN.
+  # Seen twice on 2026-08-08. Left unhandled it reads exactly like an expired
+  # session, which is the wrong diagnosis and the expensive one: the second
+  # occurrence aborted a matrix deploy mid-measurement.
+  local attempt arn
+  for attempt in 1 2 3; do
+    arn="$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
+      --query "agentRuntimes[?agentRuntimeName=='${RUNTIME}'].agentRuntimeArn | [0]" \
+      --output text 2>/dev/null)" || arn=""
+    if [[ -n "$arn" && "$arn" != "None" ]]; then
+      [[ "$attempt" -gt 1 ]] && echo "note: runtime ARN resolved on attempt ${attempt}" >&2
+      echo "$arn"
+      return 0
+    fi
+    [[ "$attempt" -lt 3 ]] && sleep 3
+  done
+  return 1
 }
 
 # AgentCore mounts the A2A server under a path built from the URL-encoded ARN.
@@ -50,8 +68,16 @@ runtime_arn() {
 # here in exactly the way it is on Cloud Run: one resource, one authorization.
 runtime_url() {
   local arn escaped
-  arn="$(runtime_arn)"
-  [[ "$arn" == "None" || -z "$arn" ]] && { echo "runtime not deployed" >&2; exit 1; }
+  arn="$(runtime_arn)" || arn=""
+  # An empty ARN has two causes and they need different fixes: the runtime is
+  # genuinely absent, or the call never reached AWS. Naming only the first sent
+  # this exact session looking for a deleted runtime that was in fact READY.
+  [[ "$arn" == "None" || -z "$arn" ]] && {
+    echo "could not resolve the '${RUNTIME}' runtime ARN in ${REGION}." >&2
+    echo "  either it is not deployed, or this shell cannot reach AWS." >&2
+    echo "  check which: aws sts get-caller-identity" >&2
+    exit 1
+  }
   escaped="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$arn")"
   echo "https://bedrock-agentcore.${REGION}.amazonaws.com/runtimes/${escaped}/invocations/"
 }
@@ -264,11 +290,36 @@ deploy() {
 }
 
 env_block() {
+  # Resolve and validate before emitting anything.
+  #
+  # These used to be command substitutions inside the heredoc below, which is
+  # a subshell: runtime_url's `exit 1` killed only that subshell, `set -e` did
+  # not see it, and the heredoc printed `AWS_A2A_ENDPOINT=` and returned 0.
+  # deploy_gcp.sh's `wire` then pushed the empty endpoint into the live
+  # coordinator job, where the median absorbs the dead leg and the run exits 0
+  # as well -- two layers of silent success over an absent cloud. Found on
+  # 2026-08-08 when an expired AWS session produced exactly that.
+  local url role_arn
+  url="$(runtime_url)" || return 1
+  role_arn="$(aws iam get-role --role-name "$ROLE_FEDERATED" \
+    --query Role.Arn --output text)" || return 1
+
+  local pair
+  for pair in "AWS_A2A_ENDPOINT:$url" "AWS_A2A_ROLE_ARN:$role_arn"; do
+    case "${pair#*:}" in
+      ""|None)
+        echo "error: ${pair%%:*} did not resolve. Is the runtime deployed, and" >&2
+        echo "       are your AWS credentials still valid? (aws sts get-caller-identity)" >&2
+        return 1
+        ;;
+    esac
+  done
+
   cat <<EOF
 # Add to the GCP master (Cloud Run job) to reach this agent:
-AWS_A2A_ENDPOINT=$(runtime_url)
+AWS_A2A_ENDPOINT=${url}
 AWS_A2A_AUTH=aws-sigv4
-AWS_A2A_ROLE_ARN=$(aws iam get-role --role-name "$ROLE_FEDERATED" --query Role.Arn --output text)
+AWS_A2A_ROLE_ARN=${role_arn}
 AWS_A2A_REGION=${REGION}
 AWS_A2A_AUDIENCE=${AUDIENCE}
 # bedrock-agentcore is already the default in coordinator/auth.py, and is what

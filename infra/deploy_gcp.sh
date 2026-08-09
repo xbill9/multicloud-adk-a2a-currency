@@ -29,6 +29,8 @@ SERVICE="${SERVICE:-currency-gcp}"
 JOB="${JOB:-currency-coordinator}"
 MATRIX_JOB="${MATRIX_JOB:-currency-matrix}"
 COORDINATOR_SA="${COORDINATOR_SA:-currency-coordinator@${PROJECT}.iam.gserviceaccount.com}"
+#: No --cloud flag, so coordinator.cli defaults to all three participants.
+THREE_CLOUD_ARGS="-m,coordinator.cli,100,USD,EUR,JPY"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO_NAME}/currency-mesh:latest"
 
 service_url() {
@@ -98,12 +100,31 @@ peer_env() {
   # matrix marks that column rather than counting it toward the interop claim;
   # unset (the local mesh) means the distinction does not arise.
   echo "CURRENCY_COORDINATOR_CLOUD=gcp"
-  local script
+  # An empty *value* is the dangerous case, not empty output. A sibling that
+  # cannot resolve its endpoint used to emit `AWS_A2A_ENDPOINT=` and exit 0;
+  # the old guard only checked that *some* assignment came back, so the empty
+  # one sailed through and got pushed to the live job. The coordinator then
+  # degrades over the dead leg and exits 0 too. Refuse instead.
+  #
+  # stderr is deliberately no longer swallowed: the sibling script explains
+  # *why* it could not resolve, and that message is the entire diagnosis.
+  local script block
   for script in deploy_aws deploy_azure; do
-    if ! "$REPO/infra/${script}.sh" env 2>/dev/null | grep -E '^[A-Z][A-Z0-9_]*=' ; then
-      echo "warning: ${script}.sh env produced nothing -- that leg will be" >&2
-      echo "         absent, and the coordinator will report it as such" >&2
+    if ! block="$("$REPO/infra/${script}.sh" env)"; then
+      echo "error: ${script}.sh env failed; refusing to wire a partial mesh." >&2
+      echo "       set ALLOW_PARTIAL_MESH=1 to wire the legs that do resolve." >&2
+      [[ "${ALLOW_PARTIAL_MESH:-}" == "1" ]] || return 1
+      continue
     fi
+    block="$(printf '%s\n' "$block" | grep -E '^[A-Z][A-Z0-9_]*=' || true)"
+    if printf '%s\n' "$block" | grep -qE '^[A-Z][A-Z0-9_]*=$'; then
+      echo "error: ${script}.sh env resolved these to nothing:" >&2
+      printf '%s\n' "$block" | grep -E '^[A-Z][A-Z0-9_]*=$' | sed 's/^/         /' >&2
+      echo "       refusing to wire a leg the coordinator cannot reach." >&2
+      echo "       set ALLOW_PARTIAL_MESH=1 to wire it anyway." >&2
+      [[ "${ALLOW_PARTIAL_MESH:-}" == "1" ]] || return 1
+    fi
+    [[ -n "$block" ]] && printf '%s\n' "$block"
   done
 }
 
@@ -115,11 +136,20 @@ wire() {
   vars="$(peer_env | paste -sd'@' -)"
   [[ -z "$vars" ]] && { echo "nothing to wire" >&2; exit 1; }
 
+  # The args matter as much as the env. `deploy` pins --cloud gcp because at
+  # that point one cloud is all there is; wiring is precisely the step that
+  # stops being true, and leaving the flag behind produced a run that reported
+  # "1/1 clouds, unverified" and exited 0 with three legs correctly configured
+  # underneath it -- the env said three clouds and the args said one.
+  # (`verify` also passes --args, but to `jobs execute`, which is an
+  # execution-scoped override and leaves the job spec alone.)
   gcloud run jobs update "$JOB" \
     --region "$REGION" --project "$PROJECT" \
-    --set-env-vars "^@^${vars}" --quiet >/dev/null
+    --set-env-vars "^@^${vars}" \
+    --args="$THREE_CLOUD_ARGS" --quiet >/dev/null
   echo "coordinator job wired:"
   peer_env | sed 's/^/  /'
+  echo "  args: ${THREE_CLOUD_ARGS//,/ }"
 }
 
 run() {

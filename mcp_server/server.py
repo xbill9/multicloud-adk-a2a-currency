@@ -31,6 +31,30 @@ TOOL = {
     },
 }
 
+#: The same rate lookup under the name and signature the shared INSTRUCTION
+#: asks for, which is also what the AWS and Azure agents register as a native
+#: tool. Without this the GCP leg was the only cloud whose tool contract did
+#: not match the prompt driving it: Gemini duly emitted
+#: `get_exchange_rate(source_currency=..., target_currency=...)` and ADK
+#: rejected it as UNEXPECTED_TOOL_CALL. `convert_currency` stays because
+#: `coordinator/mcp_stdio.py` calls it by name.
+RATE_TOOL = {
+    "name": "get_exchange_rate",
+    "description": (
+        "Look up the exchange rate between two currencies using deterministic "
+        "local fixture rates (not live rates)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "currency_from": {"type": "string"},
+            "currency_to": {"type": "string"},
+        },
+        "required": ["currency_from", "currency_to"],
+        "additionalProperties": False,
+    },
+}
+
 
 async def dispatch(message: dict, provider: RateProvider) -> dict | None:
     request_id = message.get("id")
@@ -47,17 +71,28 @@ async def dispatch(message: dict, provider: RateProvider) -> dict | None:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": [TOOL]}
+            result = {"tools": [TOOL, RATE_TOOL]}
         elif method == "tools/call":
             params = message.get("params", {})
-            if params.get("name") != TOOL["name"]:
-                raise ValueError("unknown tool")
+            name = params.get("name")
+            if name not in (TOOL["name"], RATE_TOOL["name"]):
+                raise ValueError(f"unknown tool: {name}")
             arguments = params.get("arguments", {})
-            request = ConversionRequest(
-                amount=Decimal(arguments["amount"]),
-                source_currency=arguments["source_currency"],
-                target_currencies=[arguments["target_currency"]],
-            )
+            if name == RATE_TOOL["name"]:
+                # A rate lookup, so the amount is irrelevant; 1 makes
+                # converted_amount equal the rate, which is what the caller
+                # asked for and costs no separate code path.
+                request = ConversionRequest(
+                    amount=Decimal(1),
+                    source_currency=arguments["currency_from"],
+                    target_currencies=[arguments["currency_to"]],
+                )
+            else:
+                request = ConversionRequest(
+                    amount=Decimal(arguments["amount"]),
+                    source_currency=arguments["source_currency"],
+                    target_currencies=[arguments["target_currency"]],
+                )
             try:
                 rate, observed_at = await provider.get_rate(
                     request.source_currency, request.target_currencies[0]

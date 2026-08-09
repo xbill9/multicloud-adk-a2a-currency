@@ -93,10 +93,20 @@ a2a-sdk         ok 153ms          ok 7ms            ok 8ms
 the column. Unset — the local mesh — every leg is loopback, the distinction
 does not arise, and the table reads exactly as it always did.
 
-**Not yet observed hosted.** The mechanism above is exercised against the local
-mesh, which is where the transcript came from; the deployed jobs have not been
-re-run since the change. Under this repo's deploy-then-document rule that makes
-it a code fact, not a result.
+Confirmed hosted on 2026-08-08 — the deployed matrix job prints:
+
+```console
+client \ server  gcp*              aws               azure
+a2a-sdk          ok 992ms          ok 1328ms         ok 538ms
+agent-framework  ok 504ms          ok 994ms          ok 570ms
+google-adk       transport         ok 5953ms         ok 471ms
+
+8/9 attempted cells succeeded
+  of which 6 crossed a cloud boundary and 2 did not
+```
+
+Six of the eight passing cells crossed a vendor boundary. The other two are
+Cloud Run reaching Cloud Run, and no longer count toward the interop claim.
 
 Three client SDKs × three natively-served agents. Every cell is one real A2A
 call; a failed cell records which layer broke (`transport`, `protocol`,
@@ -293,10 +303,12 @@ Done and verified:
   fired in production — it is a trap removed, not an outage explained.
 - **All three agents are deployed on their own vendor's hosting** — Cloud Run,
   AgentCore Runtime, Container Apps — and answer one question together from a
-  Cloud Run coordinator: `3/3 clouds, agreed`, 2258–2511ms across three warm
-  runs, and consensus latency at **max(legs) + ~1s** — emphatically not their
-  sum, so the legs are concurrent, but not bare max(legs) either: the ~1s is
-  the coordinator's own fixed cost, which no per-leg figure includes.
+  Cloud Run coordinator: `3/3 clouds, agreed`, and consensus latency at
+  **max(legs) + ~1s** — emphatically not their sum, so the legs are concurrent,
+  but not bare max(legs) either: the ~1s is the coordinator's own fixed cost,
+  which no per-leg figure includes. Seven warm runs across two days now sit
+  behind that: 2258–2511ms on 2026-08-07 and 1953–2169ms on 2026-08-08, with
+  the gap over `max(legs)` at 880–984ms on the second day's four.
 - **All three legs are keyless, and that is now a measured claim rather than a
   reported one.** Seven controls, 2026-08-07: each leg answers alone with its
   credential, each is denied alone without it, and the unauthenticated `curl`
@@ -334,12 +346,22 @@ Not done:
   the deployed policy is scoped to one runtime ARN, `Resource: "*"` is not
   required, and the predecessor's contrary finding was a misdiagnosis. See
   below.
-- **Most hosted latencies are single runs**, and every service scales to zero,
-  so a table can mix cold starts with warm calls unless it says which it is.
-  The consensus run is the one exception — three consecutive warm runs, which
-  is what made the `max(legs) + ~1s` floor visible and the bare `max(legs)`
-  claim untenable. The matrix cells have no distribution behind them and order
-  nothing safely.
+- ~~**Most hosted latencies are single runs.**~~ Done 2026-08-08: the matrix
+  has five consecutive warm runs behind it and the consensus seven across two
+  days, all labelled warm or cold. What that bought was not a tighter number
+  but a **retracted one** — see the AWS session finding below. Cold remains a
+  separate regime, not averaged in: the Azure leg measured 23378ms cold against
+  441–570ms warm in the same session.
+- **A documented anomaly turned out to be an artefact of the instrument.** The
+  "`agent-framework` → AWS is reproducibly ~5.7s, unexplained" claim is
+  withdrawn. Each matrix cell minted a fresh AgentCore session id
+  (`coordinator/auth.py:741`), each session gets its own microVM, and the ~5.9s
+  was that microVM starting — landing on whichever cell drew cold capacity,
+  which is why the slow cell *moved between clients* across runs. Pinning
+  `AWS_A2A_SESSION_ID` removes it (5926–6037ms → 704/710ms) and unpinning
+  brings it back, interleaved so it is not warming drift. The mesh mints a
+  fresh session per run too, so a consensus run can pay this without warning.
+  See [`docs/INTEROP.md`](docs/INTEROP.md).
 - **The AWS STS and Entra paths are proven end to end, but only on the happy
   path plus one denial each.** No token has ever expired in production: every
   deployed run is a Cloud Run job that lives a few seconds, so the refresh
@@ -349,7 +371,25 @@ Not done:
   is a clock question rather than a network one. What is still untested is a
   *real* aged token from either provider, and genuine clock skew between the
   coordinator's clock and theirs.
-- `llm` mode is implemented but has been exercised for none of the three
-  clouds; all measurements here are direct-brain.
+- **`llm` mode now runs on two of three clouds, locally** (2026-08-09): Gemini
+  via ADK over MCP, and Nova via Strands, both returning correctly formatted
+  quotes off the fixture rates. It had never produced an answer anywhere
+  before, and getting there needed code, not credentials — see the three
+  defects in [`docs/INTEROP.md`](docs/INTEROP.md). **Azure cannot run it at
+  all**: `agents/azure/server.py` requires `FOUNDRY_PROJECT_ENDPOINT` and
+  `AZURE_AI_MODEL_DEPLOYMENT_NAME`, and there is no AI Foundry project or model
+  deployment in the subscription — `az cognitiveservices account list` is empty
+  subscription-wide. Creating one is new billable infrastructure, so it is a
+  decision rather than a step.
+- **No `llm`-mode run is deployed or measured.** Both working clouds were
+  exercised on a laptop against their real models; nothing has been rebuilt or
+  redeployed, and `Dockerfile.aws` still omits `strands-agents` deliberately,
+  so the hosted AWS agent cannot serve `llm` mode as built. Every hosted number
+  in this README remains direct-brain.
+- **The matrix's `brain=` label reads the wrong environment.**
+  `matrix/runner.py:153` takes `CURRENCY_MODEL_MODE` from the *runner's* env,
+  but the brain lives in each agent — different containers once hosted. A run
+  against three `llm` agents printed `brain=direct`. The label is unreliable
+  and should come off the agent card instead; not yet fixed.
 - No token or cost accounting. Warm/cold is now labelled everywhere it is
   recorded, but only the consensus run has more than one sample behind it.
