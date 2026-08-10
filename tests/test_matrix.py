@@ -362,3 +362,68 @@ def test_an_explicit_old_version_is_still_rejected():
         body = client.get("/echo-version", headers={VERSION_HEADER: "0.3"}).json()
 
     assert body["v"] == "0.3"
+
+
+# --------------------------------------------------------------------------
+# The MCP rate tools. Added because `mcp_server/server.py` had 0% coverage and
+# `get_exchange_rate` -- which GCP's llm mode calls by name -- was verified by
+# hand over stdin and never by a test.
+# --------------------------------------------------------------------------
+
+
+def _mcp_call(name: str, arguments: dict) -> dict:
+    import asyncio
+
+    from coordinator.providers import StaticRateProvider
+    from mcp_server.server import dispatch
+
+    return asyncio.run(
+        dispatch(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": name, "arguments": arguments}},
+            StaticRateProvider(),
+        )
+    )
+
+
+def test_mcp_advertises_both_rate_tools():
+    """The prompt names get_exchange_rate; convert_currency has its own caller."""
+    import asyncio
+
+    from coordinator.providers import StaticRateProvider
+    from mcp_server.server import dispatch
+
+    reply = asyncio.run(
+        dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, StaticRateProvider())
+    )
+    names = {tool["name"] for tool in reply["result"]["tools"]}
+    assert names == {"convert_currency", "get_exchange_rate"}
+
+
+def test_get_exchange_rate_matches_the_shared_instruction_signature():
+    """AWS and Azure register (currency_from, currency_to); MCP must agree."""
+    reply = _mcp_call("get_exchange_rate", {"currency_from": "USD", "currency_to": "EUR"})
+    payload = reply["result"]["structuredContent"]
+
+    assert reply["result"]["isError"] is False
+    assert payload["source_currency"] == "USD"
+    assert payload["target_currency"] == "EUR"
+    assert payload["rate"] == "0.92"
+
+
+def test_convert_currency_still_carries_the_amount():
+    """coordinator/mcp_stdio.py calls this one by name; it must keep working."""
+    reply = _mcp_call(
+        "convert_currency",
+        {"amount": "100", "source_currency": "USD", "target_currency": "EUR"},
+    )
+    payload = reply["result"]["structuredContent"]
+
+    assert payload["converted_amount"] == "92.00"
+    assert payload["rate"] == "0.92"
+
+
+def test_an_unknown_mcp_tool_is_rejected_by_name():
+    reply = _mcp_call("get_exchange_rate_v2", {"currency_from": "USD", "currency_to": "EUR"})
+    assert "error" in reply
+    assert "get_exchange_rate_v2" in reply["error"]["message"]
