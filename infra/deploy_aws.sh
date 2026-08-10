@@ -124,14 +124,20 @@ runtime_arn() {
   # Budgeted at ~2 minutes rather than a fixed attempt count: 3x3s was too
   # short, 5 attempts over 45s was still too short, and each time the very next
   # manual call succeeded. The windows are minutes, not seconds.
-  local attempt arn delay=3
+  # Retry only when the *call* fails. A call that succeeds and reports no such
+  # runtime is a fact, not a transient, and retrying it spent two minutes on
+  # every first deploy waiting for an answer that had already arrived.
+  local attempt arn rc delay=3
   for attempt in 1 2 3 4 5 6 7; do
+    rc=0
     arn="$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
       --query "agentRuntimes[?agentRuntimeName=='${RUNTIME}'].agentRuntimeArn | [0]" \
-      --output text 2>/dev/null)" || arn=""
-    if [[ -n "$arn" && "$arn" != "None" ]]; then
+      --output text 2>/dev/null)" || rc=$?
+
+    if [[ "$rc" -eq 0 ]]; then
       [[ "$attempt" -gt 1 ]] && echo "note: runtime ARN resolved on attempt ${attempt}" >&2
-      echo "$arn"
+      # May legitimately be "None": the caller distinguishes absent from failed.
+      echo "${arn:-None}"
       return 0
     fi
     [[ "$attempt" -lt 7 ]] && { sleep "$delay"; [[ "$delay" -lt 30 ]] && delay=$((delay * 2)); }
@@ -337,7 +343,13 @@ deploy() {
   account="$(account_id)"
   ensure_exec_role
 
-  arn="$(runtime_arn)"
+  # `|| arn=""` is load-bearing. runtime_arn returns non-zero when no runtime
+  # exists, which is exactly the state of a first deploy, and an unguarded
+  # assignment under `set -e` exits the script here -- silently, before
+  # create-agent-runtime is ever reached. Found by tearing the leg down and
+  # rebuilding it: the create path had been broken by a change that only the
+  # update path exercised.
+  arn="$(runtime_arn)" || arn=""
   if [[ "$arn" == "None" || -z "$arn" ]]; then
     aws bedrock-agentcore-control create-agent-runtime --region "$REGION" \
       --agent-runtime-name "$RUNTIME" \
@@ -359,7 +371,13 @@ deploy() {
       --protocol-configuration 'serverProtocol=A2A' >/dev/null
   fi
 
-  arn="$(runtime_arn)"
+  # After a create the runtime should resolve, but it may not be listable for a
+  # moment; runtime_arn already retries. Fail loudly rather than under set -e.
+  arn="$(runtime_arn)" || {
+    echo "error: runtime was created but its ARN did not resolve." >&2
+    echo "       re-run deploy; the create is idempotent from here." >&2
+    return 1
+  }
   url="$(runtime_url)"
 
   # Two-phase by necessity: the card must advertise the invocations URL, which
