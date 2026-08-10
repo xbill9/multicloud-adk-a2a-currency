@@ -319,6 +319,20 @@ foundry() {
   local account_id principal version endpoint
 
   if ! az cognitiveservices account show -n "$FOUNDRY_ACCOUNT" -g "$RG" >/dev/null 2>&1; then
+    # Cognitive Services accounts SOFT-DELETE, and deleting the resource group
+    # does not purge them. The name stays reserved, and creating it again fails
+    # with FlagMustBeSetForRestore rather than anything mentioning deletion.
+    # So `destroy` followed by `deploy` -- the exact sequence a reader runs to
+    # rebuild from nothing -- could not recreate this account until the
+    # tombstone was purged. Found by doing that teardown on 2026-08-10.
+    if az cognitiveservices account list-deleted \
+         --query "[?name=='${FOUNDRY_ACCOUNT}'] | [0].name" -o tsv 2>/dev/null \
+         | grep -q .; then
+      echo "purging soft-deleted ${FOUNDRY_ACCOUNT} before recreating"
+      az cognitiveservices account purge -n "$FOUNDRY_ACCOUNT" \
+        -g "$RG" -l "$FOUNDRY_LOCATION" -o none 2>/dev/null || true
+    fi
+
     echo "creating AIServices account ${FOUNDRY_ACCOUNT} in ${FOUNDRY_LOCATION}"
     az cognitiveservices account create -n "$FOUNDRY_ACCOUNT" -g "$RG" \
       -l "$FOUNDRY_LOCATION" --kind AIServices --sku S0 \

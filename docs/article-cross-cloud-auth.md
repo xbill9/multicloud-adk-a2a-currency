@@ -1,271 +1,343 @@
-# Three clouds, no stored secrets
+# Three Clouds, Three Native Agents
 
-## What it takes to let agents call each other across vendors
+![A Cloud Run coordinator calling an ADK agent on Cloud Run, a Strands agent on Bedrock AgentCore, and an Agent Framework agent on Container Apps, over A2A v1.0 with no stored secrets](img/three-clouds-architecture.jpg)
+
+## What is this project trying to do?
+
+Three AI agents, each built with a different vendor's framework, each running on
+that vendor's own hosting, all answering the same question at the same time:
+
+- **Google** — an ADK agent on Cloud Run
+- **AWS** — a Strands agent on Bedrock AgentCore Runtime
+- **Azure** — an Agent Framework agent on Container Apps
+
+One coordinator calls all three over **A2A v1.0** and takes the median of their
+answers. And there is **no long-lived credential stored anywhere in the running
+system** — every call is authenticated with a token minted at the moment it is
+needed.
+
+Everything is here:
+[github.com/xbill9/multicloud-adk-a2a-currency](https://github.com/xbill9/multicloud-adk-a2a-currency).
+You can run the whole mesh on a laptop in about a minute; instructions are below.
+
+The surprise wasn't the protocol. A2A worked. The surprise was that almost every
+decision that mattered was made *before* a single A2A call happened.
+
+## Why bother? Just use a key
 
 You have an agent on one cloud. Someone asks you to have it call an agent on
-another. The reflex is to create a service account key, put it in a secret
-manager, and move on. That works, and it is the decision you will be living
-with for the rest of the project.
+another.
 
-This is a write-up of a three-cloud agent mesh — Google ADK on Cloud Run,
-Strands on Bedrock AgentCore, Microsoft Agent Framework on Container Apps — all
-speaking A2A v1.0, coordinated from one place, with no long-lived credential
-stored anywhere in the running system. The interesting part is not the protocol.
-It is that almost every consequential decision was made before any protocol was
-spoken.
+The reflex is to create a service account key, drop it in a secret manager, and
+move on. That works. It also means you now own a credential forever — rotating
+it, scoping it, auditing it, and eventually explaining to somebody why
+production contains a static key.
 
-## The asymmetry that decides everything
+There is another way, and the interesting part is that it isn't harder. It is
+just decided earlier.
 
-Cross-cloud agent auth looks like a protocol problem and is an identity
-problem. The shape of it is this:
+## The one decision that sets everything else
 
-**Every callee in this mesh consumes external OIDC.** AWS IAM has OIDC identity
-providers. Entra has Federated Identity Credentials. AgentCore Runtime accepts a
-`CUSTOM_JWT`. Each of them will accept a token minted somewhere else, if you
-configure the trust correctly.
+Here is the asymmetry the whole design falls out of.
 
-**Only some callers can mint one.** A runtime that can produce a workload OIDC
-token for an audience you choose can federate outward to anything on that list.
-A runtime that cannot must fall back to a stored credential.
+**Every agent you want to call can consume an external token.** AWS IAM has OIDC
+identity providers. Entra has Federated Identity Credentials. AgentCore accepts a
+`CUSTOM_JWT`. All three will trust a token minted somewhere else, provided you
+set the trust up correctly.
 
-That single asymmetry determines your topology, because the coordinator — the
-component that calls the others — is the only one that needs to mint.
+**But only some runtimes can mint one.** A runtime that can produce a workload
+OIDC token — for an audience *you* choose — can federate outward to any of them.
+A runtime that cannot is back to storing a credential.
 
-| Coordinator host | Outbound legs | Long-lived secrets |
-|---|---|---|
-| Cloud Run | GCP→AWS, GCP→Azure, GCP→GCP | potentially zero |
+So "where does my coordinator run?" is really "how many secrets will this system
+have?"
+
+| Coordinator host | Legs it makes | Long-lived secrets |
+| :--- | :--- | :--- |
+| **Cloud Run** | GCP→AWS, GCP→Azure, GCP→GCP | potentially **zero** |
 | AgentCore | AWS→Azure, AWS→GCP | at least one |
 | Foundry | Azure→AWS, Azure→GCP | one or two, both unproven |
 
-Cloud Run is the choice here because its metadata server mints ID tokens for an
-arbitrary audience, and that is exactly the input the other two clouds' trust
-policies want. Whether AgentCore Runtime can do the same is, as far as this
-project established, simply unconfirmed — so "secretless" is a property of
-*this* topology, not a general claim about cross-cloud agents.
+Cloud Run wins here because its metadata server hands you an ID token for any
+audience you name, which is exactly what the other two clouds' trust policies
+want to see. Whether AgentCore can do the same is unconfirmed — I did not test
+it. So "zero secrets" is a property of *this* topology, not a law about
+cross-cloud agents.
 
-It also has a cost worth stating plainly. Putting the coordinator on Cloud Run
-means the GCP leg is a hop that never leaves Google Cloud. Two of the three legs
-cross a vendor boundary; the third does not, and counting it toward an interop
-claim would inflate the result.
+Two things that choice costs you, worth saying out loud:
 
-There is a second-order consequence that surprised me. A user credential cannot
-mint an arbitrary-audience ID token at all, so there is no laptop equivalent of
-this path. The coordinator cannot be run locally, even for debugging. Once you
-choose federation, the only place the system works is the place it is deployed.
+**One leg stops being cross-cloud.** The coordinator runs on Cloud Run, so the
+GCP leg is Google calling Google. Two vendor boundaries get crossed, not three.
+That belongs in the results, not in a footnote.
 
-## Three mechanisms, one seam
+**You cannot run it locally.** A user credential cannot mint an
+arbitrary-audience ID token at all — `gcloud auth print-identity-token
+--audiences=...` refuses outright, telling you it requires a service account.
+There is no laptop version of this path. Once you choose federation, the only
+place the system works is the place it is deployed.
 
-The three legs use genuinely different machinery:
+## Three legs, three mechanisms, one seam
 
-- **GCP → GCP** — a Google ID token whose audience is the receiving service's
-  URL, authorized by `roles/run.invoker`.
-- **GCP → AWS** — the same metadata mint, presented to STS
-  `AssumeRoleWithWebIdentity`, exchanged for temporary credentials, used to sign
-  the request with SigV4.
-- **GCP → Azure** — the same metadata mint again, presented to Entra as a client
-  assertion against a Federated Identity Credential, exchanged for an access
-  token.
+The legs do not look alike:
 
-Three exchanges, three token formats, one of which is not a bearer token at all
-but a signature over the request body. Putting them behind one interface is the
-single decision that made the rest tractable.
+- **GCP → GCP** — an ID token whose audience is the target service's URL, plus
+  `roles/run.invoker`.
+- **GCP → AWS** — mint that token, hand it to STS `AssumeRoleWithWebIdentity`,
+  get temporary credentials back, sign the request with SigV4.
+- **GCP → Azure** — mint that token, present it to Entra as a client assertion
+  against a Federated Identity Credential, get an access token back.
 
-The interface is `httpx.Auth`. It is the only shape that spans both cases: to
-httpx, a bearer header and a request signature are the same kind of object. All
-three vendor client SDKs accept an `httpx.AsyncClient`, so the credential
-attaches once and every call through that client carries it.
+Two bearer tokens and a request signature. Different shapes entirely.
 
-Build this seam before the first deployed peer, not after the third. The
-temptation is to get one leg working with inline code and generalise later, and
-by the time you have three legs you have three error-handling styles and three
-places where a token is cached.
+The move that made the rest tractable was putting all three behind one interface:
+`httpx.Auth`. To httpx, a bearer header and a signature over the request body are
+the same kind of object. All three vendor SDKs accept an `httpx.AsyncClient`. So
+the credential attaches once, and everything through that client carries it.
 
-**Discovery is privileged, and it is easy to miss.** An agent's card lives at
-`/.well-known/agent-card.json` behind the same authorization as the agent
-itself. If the credential attaches to the message call but not the card fetch,
-you get a 403 during discovery — which surfaces as a protocol or transport
-error, nowhere near auth, pointing at the wrong layer. Attaching auth to the
-client rather than the request is what makes this correct by construction.
+```python
+auth = credentials_for(peer, endpoint)   # an httpx.Auth, or None
+client = load_client(stack, endpoint, auth=auth)
+```
 
-## The traps that cost real time
+Build that seam **before** your second cloud, not after your third. Get one leg
+working with inline code and promise to generalise later, and you end up with
+three error-handling styles and three places a token gets cached.
 
-These are not configuration mistakes. Each one looks like correct configuration
-and fails silently or misleadingly.
+> **Worth noticing:** an agent's card lives at `/.well-known/agent-card.json`,
+> and it sits behind the same authorization as the agent itself. Attach your
+> credential to the *request* instead of the *client* and discovery 403s while
+> the actual call would have worked. You get a protocol error pointing nowhere
+> near auth. Attaching to the client makes that impossible by construction.
 
-**Audience is caller-chosen, so audience alone is never authorization.** The
-caller decides what audience to request. A trust policy that only checks the
-audience proves that *some* identity in that IdP minted a token, which is not
-the same as proving *this* identity did. Pin the subject as well — and pin it to
-the immutable numeric ID, never the email, because an email can be released and
-re-bound to a different principal.
+## Five traps that look exactly like working configuration
 
-**AWS and Azure have opposite rules for the same-looking task.** AWS federates
-with `accounts.google.com` natively; creating an explicit IAM OIDC provider for
-it *breaks* federation with `InvalidIdentityToken`. Entra requires you to create
-the Federated Identity Credential explicitly. Same conceptual step, inverted
-prerequisites, and the failure from getting it backwards names neither.
+None of these are typos. Each is something you can get wrong while being careful.
 
-**The IAM condition keys do not mean what they are named.**
-`accounts.google.com:oaud` is the token's `aud` claim.
-`accounts.google.com:aud` is its `azp`, which is a number. Putting an audience
-string in `:aud` produces a condition that can never match, and the denial does
-not explain why.
+**Audience is not authorization.** The *caller* picks the audience. So a trust
+policy checking only audience proves that *somebody* in that IdP minted a token —
+not that *your* identity did. Pin the subject too, and pin it to the immutable
+numeric ID rather than the email, because emails can be released and re-bound to
+someone else.
 
-**Ask for the full token.** The GCP metadata mint takes a `format` parameter,
-and without `format=full` Google trims claims including `email`. Trust
-conditions that read a trimmed claim stop matching, with no error saying so.
+**AWS and Azure invert the same step.** AWS federates with `accounts.google.com`
+natively — create an explicit IAM OIDC provider for it and you *break* it with
+`InvalidIdentityToken`. Entra requires you to create the credential explicitly.
+Same conceptual task, opposite prerequisites, and neither error tells you which
+rule you are on.
 
-**Two error codes are worth more than any amount of logging.** From STS,
-`InvalidIdentityToken` means the token could not be validated at all — a
+**The IAM condition keys do not hold what their names say.**
+`accounts.google.com:oaud` is the token's `aud`. `accounts.google.com:aud` is its
+`azp`, which is a number. Put an audience string in `:aud` and you have written a
+condition that can never match. The denial will not mention it.
+
+**Ask for the whole token.** The GCP metadata mint takes `format=full`. Without
+it, Google trims claims — including `email` — and any trust condition reading
+that claim silently stops matching.
+
+**Two error codes are worth more than a day of logging.** From STS,
+`InvalidIdentityToken` means the token did not validate at all, which is a
 provider-setup problem. `AccessDenied` means it validated fine and your
-conditions did not match — a policy problem. Those are different afternoons, and
-the distinction is the fastest diagnostic available.
+conditions did not match, which is a policy problem. Different afternoons.
 
-That last point generalises into the one piece of engineering advice I would
-carry to any similar project: **log the raw provider response at every auth
-boundary.** In an agent system the error travels back as a tool result and can
-be paraphrased by a model before a human sees it. A raised message is not an
-observable. The federation work is straightforward; reading the failures is
-where the time goes.
+Which leads to the one habit I would carry to any project like this: **log the
+raw provider response at every auth boundary.** In an agent system an error comes
+back as a tool result, and a model in the middle will cheerfully paraphrase
+`AccessDenied: condition accounts.google.com:sub did not match` into "there was
+an issue with the credentials." A raised message is not an observable.
 
-## Deployment strategy
+## Running it
 
-**Hosting decides the auth bill.** This is the same claim as the opening
-section, viewed from the deployment side: the coordinator's runtime is not a
-deployment detail to settle later. It determines how many long-lived secrets the
-entire system needs. Decide it first.
+Start local. Three agents on loopback, no cloud account, about a minute:
 
-**Scale to zero, and label what that costs.** Every service here idles at zero
-replicas. That is the right steady state for a demonstrator — paying for idle
-capacity on three clouds to make a latency table look tidier is paying to
-mislead — but it means the first call into any leg pays a cold start. Measured
-here, a cold Azure leg took 23.4 seconds against 0.5 seconds warm. If a table
-mixes those two regimes without saying which is which, every conclusion drawn
-from it is wrong. Label warm and cold, or do not publish the number.
+```bash
+git clone https://github.com/xbill9/multicloud-adk-a2a-currency
+cd multicloud-adk-a2a-currency
 
-**Deployment belongs in the repository as verbs, not in a runbook.** `deploy`,
-`wire`, `verify`. The identifiers for each cloud live in exactly one place — the
-script that created them — and the other scripts read them back out rather than
-keeping a second copy. A redeployed AgentCore runtime has a new ARN, and its
-invocation URL contains that ARN, so any copy of it elsewhere is stale the
-moment it is written down.
+uv pip install --system "a2a-sdk[http-server]" google-adk \
+  agent-framework-a2a agent-framework-core \
+  pydantic httpx uvicorn pytest pytest-asyncio
+uv pip install --system -e .
+```
 
-There is a sharper reason than tidiness, and I demonstrated it on myself. I
-changed one environment variable on the AgentCore runtime with a direct API
-call rather than through the script. The update API replaces configuration
-rather than merging it, so the `serverProtocol=A2A` setting the script always
-passes was silently dropped. The runtime stayed `READY`, its health check
-passed, and every A2A request to it returned `400` on the agent card — a
-failure that says nothing about the field that was lost. The script sets that
-field on every call precisely so it cannot go missing. Once a runtime's
-configuration is only correct when all of it is written at once, a partial
-update from outside the script is a live hazard, not a shortcut.
+Bring up the three agents and ask them a question:
 
-**Separate "deployed" from "wired".** Deploying one cloud gives a one-cloud
-mesh. Wiring is the step that makes it three, and it depends on the other clouds
-already existing. Keeping them as separate verbs makes the dependency explicit
-instead of encoding it in the order someone happens to run things.
+```bash
+./infra/run_mesh.sh start          # :10001 :10002 :10003
+python3 -m coordinator.cli 100 USD EUR JPY
+```
 
-## Scaffolding
+Three vendors' agent stacks answering together:
+
+```
+participants: gcp, aws, azure
+
+100 USD = 92 EUR @ 0.92 [3/3 clouds, agreed]
+    gcp                  92 (164ms)
+    aws                  92 (25ms)
+    azure                92 (12ms)
+```
+
+The demo is the more interesting run, because it shows what happens when a
+participant is *wrong*:
+
+```bash
+./infra/demo.sh
+```
+
+Four acts: three clouds answering, the 3×3 interop matrix, a cloud going
+offline, and a cloud lying. The last two are the point — anything can show three
+green ticks.
+
+Deploying for real is one script per cloud, then one command to wire them
+together:
+
+```bash
+./infra/deploy_aws.sh   deploy     # AgentCore Runtime + federated role
+./infra/deploy_azure.sh deploy     # Container App
+./infra/deploy_azure.sh fic        # Entra app registration + federated credential
+./infra/deploy_azure.sh auth       # make the ingress actually demand it
+
+./infra/deploy_gcp.sh deploy       # ADK service + coordinator job
+./infra/deploy_gcp.sh wire         # fold the AWS and Azure legs in
+./infra/deploy_gcp.sh run          # three-cloud consensus, from the cloud
+./infra/deploy_gcp.sh verify       # the negative controls
+```
+
+> **Run `verify` twice.** It is the part that decides whether any of the auth
+> claims mean anything, for a reason covered below.
+
+## Deployment decisions that aged well
+
+**Put deployment in the repo as verbs, not in a runbook.** `deploy`, `wire`,
+`verify`. Each cloud's identifiers live in exactly one place — the script that
+created them — and the other scripts read them back rather than keeping copies.
+
+I can tell you precisely what that buys, because I tore the entire mesh down and
+rebuilt it from nothing to check.
+
+The AWS runtime came back with a **different ARN**, and its invocation URL
+contains that ARN. The Entra app registration came back with a **different client
+ID**. The Container App came back on a **different FQDN**. Nothing was edited by
+hand. `wire` read all three back out and the mesh returned:
+
+```
+100 USD = 92 EUR @ 0.92 [3/3 clouds, agreed]
+```
+
+Any copy of any of those identifiers stored anywhere else would have been stale
+the moment it was written down.
+
+That teardown also found two bugs that no amount of redeploying would have,
+because they live on code paths you can only reach from nothing:
+
+- A retry wrapper I had added to the AWS script made "no runtime exists" return
+  an error instead of the string `None`. Under `set -e`, a *first* deploy died
+  silently before ever creating the runtime. Every deploy since I wrote it had
+  taken the update branch, so nothing ran the broken path.
+- Azure **soft-deletes** Cognitive Services accounts. Deleting the resource group
+  does not purge them, so recreating by the same name fails with
+  `FlagMustBeSetForRestore` — an error that never mentions deletion. `destroy`
+  followed by `deploy` could not rebuild the Foundry account.
+
+> **If you take one operational thing from this article:** rebuild from nothing
+> at least once before you tell anyone it is reproducible.
+
+**Scale to zero, and label what it costs.** Everything here idles at zero
+replicas. Paying for idle capacity on three clouds to make a latency table look
+tidier is paying to mislead. But it means the first call into a leg pays a cold
+start — a cold Azure leg measured **27.8 seconds** against **0.5 seconds** warm.
+Mix those two regimes in one table and every conclusion drawn from it is wrong.
+
+## Scaffolding worth stealing
 
 Four structures did most of the work.
 
-**One credential seam.** Described above. `credentials_for(peer)` returns
-something that knows how to authenticate to that peer, and callers do not know
-which of the three mechanisms they are using.
+| Structure | What it buys |
+| :--- | :--- |
+| One credential seam (`httpx.Auth`) | callers never know which of three mechanisms they are using |
+| One participant interface (`convert()`) | a cloud is an implementation, not a branch |
+| An instrument, not a demo | every failure typed by layer, not just red |
+| Controls scoped to one leg | a degrading system cannot hide a denial from you |
 
-**One participant interface.** A cloud is an implementation of a small protocol
-— `convert()` — not a branch in the coordinator. Adding a cloud means adding an
-implementation and an entry in a registry. This is what makes it possible to
-express "every client against every server" as a loop rather than a rewrite.
+That last one is the one I would most want you to copy, because getting it wrong
+is invisible.
 
-**An instrument, not a demo.** The matrix runs every client stack against every
-served agent and records, for each failure, *which layer broke*: transport,
-protocol, timeout, authentication, provider. Typing the failure is the
-difference between "the mesh is broken" and "discovery is returning 403 on one
-leg". The classification has to walk the vendor SDK's exception chain, because
-each stack wraps the original cause in a type of its own.
+The mesh takes a median across three clouds and degrades on purpose. Lose a
+cloud, the other two still reach quorum, and the run exits **0**. Now try testing
+your auth by removing one leg's credential from a three-cloud run. It still exits
+0. That reads as "no denial happened." What actually happened is "the denial was
+absorbed."
 
-**Negative controls, scoped to one component at a time.** This is the piece I
-would most encourage copying, because getting it wrong is invisible.
-
-The mesh uses a median across three clouds and degrades on purpose: if one cloud
-fails, the other two still reach quorum and the run exits successfully. That is
-correct behaviour at runtime and it makes a naive control useless. Remove one
-leg's credential from a three-cloud run and the run still exits 0 — which reads
-as "no denial occurred" when what actually happened is "the denial was absorbed."
-
-So every leg is probed alone. Seven probes: each leg answering with its
-credential, each leg denied without it, and an unauthenticated request rejected
-outright. Only then does the exit code mean anything.
+So every leg gets probed alone. Eight probes: each leg answering with its
+credential, each leg denied without it, an unauthenticated request rejected, and
+a right-identity-wrong-audience request rejected. Only then does an exit code
+mean anything.
 
 The general form: **any system with graceful degradation needs its controls
-scoped to a single component, or the degradation hides the failure you are
-testing for.**
+scoped to a single component, or the degradation hides exactly the failure you
+are testing for.**
 
 ## What it costs
 
-Four consecutive warm runs of the three-cloud consensus, min–max across the
-four:
+Warm runs of the three-cloud consensus, after the rebuild:
 
 | | GCP (in-cloud) | AWS | Azure | elapsed |
-|---|---|---|---|---|
-| range | 1042–1200ms | 1073–1157ms | 474–587ms | 1953–2169ms |
+| :--- | :--- | :--- | :--- | :--- |
+| range | 836–948ms | 1027–1109ms | 468–512ms | 1711–1854ms |
 
-Three further warm runs the previous day landed at 2258–2511ms elapsed, with
-the same relationship between elapsed time and the slowest leg.
+Elapsed lands roughly a second above the *slowest single leg*, and far below the
+sum of all three. The legs are issued concurrently, so the sum was never the
+right model — but neither is the slowest leg on its own. That extra second is the
+coordinator's own fixed cost: container start, three agent-card fetches, three
+credential mints.
 
-Elapsed time sits consistently about a second above the slowest single leg, and
-far below the sum of all three. The legs are issued concurrently, so the sum was
-never the right model — but neither is the slowest leg on its own. That extra
-second is the coordinator's own fixed cost: container start, three agent-card
-fetches, three credential mints. No per-leg figure contains it. An earlier
-version of this claim quoted the slowest leg alone and was wrong by 85% on the
-fastest run, which is the sort of error that only shows up once there is more
-than one sample.
+> **Worth noticing:** an earlier version of this claim quoted the slowest leg
+> alone and was **wrong by 85%** on the fastest run. That error only became
+> visible once there was more than one sample.
 
-The federation itself is not expensive. Token mints and exchanges are a small
-part of that fixed second. If the mesh feels slow, the cause is a cold start or
-a model, not the identity work.
+The federation itself is cheap. Token mints and exchanges are a small slice of
+that fixed second. If the mesh feels slow, it is a cold start or a model — not
+the identity work.
 
 ## What this does not show
 
-One deployment, one account, one region pair, one operator, over a few days.
-These are existence proofs — a thing worked, in a configuration, once. They are
-not measurements of a population.
+One deployment, one account, one region pair, one person, over a few days. These
+are existence proofs: a thing worked, in a configuration. They are not
+measurements of a population.
 
-The mesh is keyless in operation, not in bootstrap: creating trust policies, app
+It is keyless in operation, not in bootstrap. Creating trust policies, app
 registrations and federated credentials used ordinary operator credentials, as
-provisioning always does. The claim is about the running system.
+provisioning always does.
 
-That claim is worth stating precisely, because checking it turned up a
-credential I had not counted. The three A2A legs were always keyless, but the
-Azure app pulled its container image using the registry's admin password, held
-as a secret in the app's own configuration. It was not on any agent-to-agent
-path, and it would still have made "no stored secrets" false as written.
-Container Apps supports pulling by managed identity, so the fix was to grant
-the app's identity `AcrPull` and delete the secret. An audit of all three
-deployments now shows no stored credential in any of them: the AWS runtime's
-environment holds five plain values, the Cloud Run service and job reference no
-secrets, and the Container App's secret list is empty with its registry set to
-identity-based pull.
+And that claim needed checking, which is the honest part. The three A2A legs were
+always keyless — but the Azure app pulled its container image using the
+registry's admin password, stored as a secret in its own configuration. Not on
+any agent-to-agent path, and still enough to make "no stored secrets" false as
+written. Container Apps supports pulling by managed identity, so the fix was a
+role grant and deleting the secret. An audit of all three deployments now shows
+no stored credential in any of them.
 
-The general point is duller than the fix: image pull is part of the deployed
-system, and a claim about secrets has to cover the whole of it rather than the
-interesting part.
+The dull general point: **image pull is part of your deployed system.** A claim
+about secrets has to cover all of it, not just the interesting part.
 
-Token expiry and refresh are implemented and covered by tests, but no token has
-expired in production — every run is a job that lives a few seconds, so the
-refresh paths have not executed against a real provider.
+Token expiry and refresh are implemented and tested against a frozen clock, but
+no token has ever expired in production — every run is a job that lives a few
+seconds.
 
-And the third leg is an in-cloud hop, as described at the top. Two boundaries
-crossed, not three.
-
-## What I would tell someone starting this
+## If you are starting one of these
 
 Decide where the coordinator runs before anything else; it sets the secret count
-for the whole system. Build the credential seam before the second cloud. Attach
+for the entire system. Build the credential seam before the second cloud. Attach
 auth to the client, not the request, so discovery is covered. Log the provider's
 own words at every boundary, because you will spend more time reading auth
-failures than writing auth code. And scope your controls to one component,
-because a system designed to survive a failure will happily hide one from you.
+failures than writing auth code. Scope your controls to one component, because a
+system built to survive failure will happily hide one from you.
+
+And rebuild it from nothing once, before you claim it is reproducible.
+
+---
+
+**Repo:**
+[github.com/xbill9/multicloud-adk-a2a-currency](https://github.com/xbill9/multicloud-adk-a2a-currency)
+— the three agents, the coordinator, the interop matrix, the deploy scripts, and
+the findings write-ups in `docs/`.
