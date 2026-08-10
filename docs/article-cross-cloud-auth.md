@@ -227,6 +227,13 @@ hand. `wire` read all three back out and the mesh returned:
 Any copy of any of those identifiers stored anywhere else would have been stale
 the moment it was written down.
 
+Then the whole verification pass ran again against infrastructure that had not
+existed an hour earlier: three consensus runs at `3/3 clouds, agreed`, and all
+eight auth probes — each leg answering with its credential, each leg denied
+without it, an unauthenticated request rejected, and a right-identity
+wrong-audience request rejected. Every number in this article comes from that
+rebuilt mesh.
+
 That teardown also found two bugs that no amount of redeploying would have,
 because they live on code paths you can only reach from nothing:
 
